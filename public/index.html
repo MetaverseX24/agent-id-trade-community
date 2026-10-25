@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent ID 三平台示例</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body><main>
+  <header><div><span class="eyebrow">BSC · READ-ONLY DEMO</span>
+    <h1>Agent ID 三平台识别台</h1>
+    <p>Four.meme、Flap、Gang.fun · 只读识别与买卖意图演示</p></div></header>
+  <section class="panel"><strong>公开演示版：按钮不连接钱包，不签名，不发送交易。</strong></section>
+  <section class="panel">
+    <label for="token">代币 CA / Flap 市场地址</label>
+    <div class="address-row"><input id="token" spellcheck="false" autocomplete="off" placeholder="0x…"><button id="inspect">识别</button></div>
+    <div id="identified" class="identified" aria-live="polite">输入完整地址，查看平台、阶段和报价资产。</div>
+  </section>
+  <div class="columns">
+    <section class="panel"><h2>买入意图</h2>
+      <label for="bnb">BNB 预算</label><input id="bnb" inputmode="decimal" placeholder="例如 0.2">
+      <p class="help">演示预算和目标仓位输入，不会查询余额或真实报价。</p>
+      <div class="button-grid"><button data-buy="1">目标 1%</button><button data-buy="0.5">目标 0.5%</button></div>
+      <div class="custom"><label for="buyPercent">自定义目标 %</label><div><input id="buyPercent" inputmode="decimal" placeholder="例如 0.25"><button id="buyCustom">生成预览</button></div></div>
+    </section>
+    <section class="panel"><h2>卖出意图</h2>
+      <p class="help">按持仓比例演示，不读取真实仓位。</p>
+      <div class="button-grid"><button data-sell="10">10%</button><button data-sell="30">30%</button><button data-sell="50">50%</button><button data-sell="100">100%</button></div>
+      <div class="custom"><label for="sellPercent">自定义卖出 %</label><div><input id="sellPercent" inputmode="decimal" placeholder="例如 25"><button id="sellCustom">生成预览</button></div></div>
+    </section>
+  </div>
+  <section class="panel"><h2>本地演示预览</h2><p id="message" role="status">等待操作</p><pre id="preview"></pre></section>
+  <footer>平台登记、合约阶段与路由可能变化。此页面只读链上信息，不能据此判断交易安全或直接交易。</footer>
+</main></body>
+</html>
