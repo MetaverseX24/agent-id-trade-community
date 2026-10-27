@@ -15,4 +15,7 @@ state/
 sessions/
 secrets/
 credentials/
+data/
+.wallets/
+*.secret
 coverage/
