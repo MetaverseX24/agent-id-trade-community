@@ -1,6 +1,6 @@
 ---
 name: agent-id-terminal-trade
-description: 在自托管 Agent ID Community 终端按用户明确参数买卖 BSC Four.meme、Flap ID Agent Curve、Gang.fun 代币，支持多钱包选择和回执核对。查询、截图与安装不构成下单授权。
+description: 在自托管 Agent ID Community 终端按用户明确参数买卖 BSC Four.meme、Flap ID Agent Curve、Gang.fun 代币，支持多钱包选择、可选发射后转出和回执核对。查询、截图与安装不构成下单授权。
 ---
 
 # Agent ID 交易
@@ -29,6 +29,9 @@ bps=100 为总量 1%，卖出 bps=10000 为当前持仓全部；按金额买用 
 
 手机确认超过 5 分钟及 30 秒缓冲后，由队列核对完整历史、钱包身份、回执、交易锁和 pending/latest nonce，只有证实请求过期且未广播才解除旧记录。不得仅按超时时间、无 txHash 或页面失败就删状态重发；旧请求关闭不代表已经成交，也不自动执行失败的历史点击。
 
-RPC 留空走公共节点，配置自己的 HTTPS/WSS，不使用维护者私有节点。登录及连接密钥仅留在本部署 data/，不提交 Git。本版没有自动止盈止损/转出，不把参考项目的功能误报为已实现。
+RPC 留空走公共节点，配置自己的 HTTPS/WSS，不使用维护者私有节点。登录及连接密钥仅留在本部署 data/，不提交 Git。本版没有自动止盈止损，不把参考项目的功能误报为已实现。
 
 看盘用 `/api/market`、`/api/detail?token=<CA>&interval=1m|5m|15m|1h`，收藏保存在本部署。持仓和盈亏用 `/api/portfolio?walletId=<ID>`；只读接口不下单。成本、已实现和未实现收益按各底池币单位展示，Gas 单列。`basisComplete=false` 不能当成零成本盈利，不能据此擅自启动自动卖出；市值或页面单价也不代表整仓实际可兑金额。
+
+
+公开版允许用户在每笔买入中设置 `migration: {enabled: true, recipient: "<本人指定BSC地址>"}`。不提供该字段默认关闭，不复用作者或其他用户的收款地址。只在用户明确勾选/授权并提供收款地址时添加；不能因为发 CA 默认买入就擅自打开转出。币安地址簿与 App 确认仍适用。`GET /api/migrations` 查看每钱包规则，`POST /api/migrations/stop` 使用 walletId/id 关闭后续动作。链上确认进入外盘后转出该币剩余全部余额，Flap 先领取；不将页面进度等同于解锁。失败或未知结果不重复提交；公开版仍没有翻倍卖半/止损自动策略。

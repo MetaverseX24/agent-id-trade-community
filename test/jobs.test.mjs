@@ -49,3 +49,16 @@ test('settings never return a private RPC credential',()=>{
   assert.throws(()=>updateSettings({rpcHttp:'wss://example.com'}));
   assert.throws(()=>updateSettings({rpcHttp:'http://localhost'}));
 });
+
+test('public migration transfer is scoped to a verified external token, selected wallet and recipient',async()=>{
+  settings.liveTrading=true;const pool=makePool(),recipient='0x'+'3'.repeat(40);let ran=0;
+  const jobs=new Jobs({pool,provider:{},quote:()=>{},environment:()=>({}),detect:async()=>({platform:'gang',phase:'curve',token})});jobs.rows=[];
+  jobs.run=row=>{ran++;row.running=false;row.stage='confirmed';jobs.locks.delete('primary');};
+  const request={token,recipient,expectedWallet:address,action:'transfer',requestId:randomUUID()};
+  await assert.rejects(jobs.operation(request,{migration:true}),/verified_external/);assert.equal(ran,0);
+  jobs.detect=async()=>({platform:'gang',phase:'graduated',token,pair:token});
+  await assert.rejects(jobs.operation({...request,expectedWallet:recipient},{migration:true}),/identity_changed/);
+  const result=await jobs.operation(request,{migration:true});assert.equal(ran,1);assert.equal(result.jobs[0].requested.recipient,recipient);
+  await jobs.operation(request,{migration:true});assert.equal(ran,1);
+  settings.liveTrading=false;await assert.rejects(jobs.operation({...request,requestId:randomUUID()},{migration:true}),/not_enabled/);
+});

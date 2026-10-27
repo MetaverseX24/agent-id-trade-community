@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { previewRiskState } from './preview_policy.mjs';
+import {networkEnvironment} from './network_env.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -10,7 +11,7 @@ export class WalletCliError extends Error {
 }
 
 export async function baw(args, timeout = 30000, environment = process.env) {
-  const env = { ...environment };
+  const env = networkEnvironment(environment);
   // The official CLI sends the hostname in an HTTP header; normalize non-ASCII
   // display names without changing device MAC, encryption, sessions or signing.
   const compat=fileURLToPath(new URL('./ascii_device.cjs',import.meta.url)).replaceAll('\\','/');

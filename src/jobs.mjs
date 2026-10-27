@@ -11,6 +11,10 @@ import { coreAbi } from './protocol_snapshot.mjs';
 import { previewRiskState } from './engine/preview_policy.mjs';
 import { makeWorkflowConsent } from './engine/agent_ui/workflow_consent.mjs';
 import {ExpiredOrders,orderStatePaths} from './engine/agent_ui/expired_orders.mjs';
+import {migrationOptions} from './migration_rules.mjs';
+import {reconcileRecordedCall} from './engine/agent_ui/recovery.mjs';
+import {verifyTokenTransfer} from './engine/agent_ui/transfer_receipt.mjs';
+import {baw} from './engine/wallet_cli.mjs';
 
 export function validateOrder(input,maxBuy=settings.maxBuyBNB){
   const token=getAddress(input.token),action=input.action;
@@ -22,7 +26,9 @@ export function validateOrder(input,maxBuy=settings.maxBuyBNB){
   const budgetBNB=String(input.budgetBNB??maxBuy);
   if(action==='buy'&&(!/^(?:0|[1-9]\d*)(?:\.\d{1,18})?$/.test(budgetBNB)||parseEther(budgetBNB)<=0n||parseEther(budgetBNB)>parseEther(maxBuy)))throw Error('买入金额超过单钱包限额');
   if(action==='buy'&&!['percent','bnb'].includes(mode))throw Error('买入方式无效');
-  return {token,action,mode,bps,budgetBNB,walletIds,requestId:input.requestId||randomUUID()};
+  const migration=action==='buy'?migrationOptions(input.migration):{enabled:false,recipient:null};
+  if(migration.enabled&&migration.recipient===token)throw Error('收款地址不能是代币合约');
+  return {token,action,mode,bps,budgetBNB,walletIds,migration,requestId:input.requestId||randomUUID()};
 }
 export class Jobs extends EventEmitter{
   constructor({provider,pool,quote,environment,detect=detectAgentToken}){super();this.provider=provider;this.pool=pool;this.quote=quote;this.environment=environment;this.detect=detect;
@@ -62,14 +68,15 @@ export class Jobs extends EventEmitter{
         const status=await this.pool.status(walletId);
         if(!status.ready)throw Error(status.error||'钱包未连接或设置未就绪');
         const actual=status.address?.toLowerCase();if(!actual||selectedAddresses.has(actual))throw Error('同一个钱包地址不能重复下单');selectedAddresses.add(actual);
+        if(order.migration.enabled&&order.migration.recipient.toLowerCase()===actual)throw Error('自动转出收款地址不能是付款钱包自己');
         if(!profile.local){remoteSubmitted=true;row.stage='worker_submitting';this.save();const data=await this.pool.request(profile,'/worker/trade',{...order,walletIds:['primary']});
           const remote=data.jobs?.[0];if(!remote?.id)throw Error('钱包节点未返回订单');
-          Object.assign(row,{remoteId:remote.id,platform:remote.platform,stage:remote.stage,running:remote.running,events:remote.events||[]});
+          Object.assign(row,{remoteId:remote.id,token:remote.token||row.token,platform:remote.platform,stage:remote.stage,running:remote.running,events:remote.events||[]});
           if(!row.running)this.locks.delete(walletId);this.save();return row;}
         const info=await this.detect(this.provider,order.token,coreAbi,status.address);
         if(!['curve','standard_curve'].includes(info.phase)&&!info.pair)throw Error('当前交易路径未验证');
         if(order.action==='buy'&&order.bps>(info.platform==='flap'?200:100))throw Error('超过平台单钱包持仓上限');
-        row.platform=info.platform;row.walletAddress=status.address;this.locks.set(walletId,row.id);
+        row.platform=info.platform;row.engineToken=order.token;row.token=info.token;row.walletAddress=status.address;this.locks.set(walletId,row.id);
         this.run(row,info,order,status.address);return row;
       }catch(error){row.running=false;row.stage=remoteSubmitted?'submission_unknown':'error';row.events.push({stage:row.stage,error:remoteSubmitted?'节点响应超时，先核对原订单，禁止重新下单':String(error.message).replace(/https?:\/\/\S+/g,'[endpoint]')});
         if(this.locks.get(walletId)===row.id)this.locks.delete(walletId);this.save();return row;}
@@ -115,20 +122,35 @@ export class Jobs extends EventEmitter{
     const child=this.children.get(id);if(!child||!row.running)throw Error('订单已结束');
     row.awaitingApproval=false;row.stage='approval_sent';child.stdin.write('APPROVE\n');this.save();
   }
-  async operation(input){if(process.env.AGENT_PRIVATE_OPERATIONS!=='1')throw Error('private_operations_disabled');
+  async operation(input,{migration=false}={}){if(!migration&&process.env.AGENT_PRIVATE_OPERATIONS!=='1')throw Error('private_operations_disabled');
+    if(migration&&(input.action!=='transfer'||!settings.liveTrading))throw Error('migration_transfer_not_enabled');
     if(!['claim','transfer'].includes(input.action)||!/^[0-9a-f-]{36}$/i.test(input.requestId||''))throw Error('invalid_position_operation');
     const token=getAddress(input.token),recipient=input.action==='transfer'?getAddress(input.recipient):null;
     if(recipient===ZeroAddress||recipient===token)throw Error('invalid_transfer_recipient');
-    const prior=this.rows.find(r=>r.walletId==='primary'&&r.requestId===input.requestId);if(prior)return {jobs:[prior]};
+    const prior=this.rows.find(r=>r.walletId==='primary'&&r.requestId===input.requestId);if(prior){
+      if(prior.action!==input.action||prior.token?.toLowerCase()!==token.toLowerCase()||prior.requested?.recipient?.toLowerCase()!==recipient?.toLowerCase())throw Error('position_operation_request_conflict');
+      return {jobs:[prior]};}
     if(this.locks.has('primary'))throw Error('wallet_job_running');
+    if(this.rows.some(j=>j.walletId==='primary'&&['receipt_unresolved','submission_unknown','interrupted_check_chain'].includes(j.stage)))throw Error('wallet_previous_order_needs_reconciliation');
     const id=randomUUID();this.locks.set('primary',id);
     try{const status=await this.pool.status('primary');if(!status.ready)throw Error(status.error||'wallet_not_ready');
+      if(input.expectedWallet&&status.address?.toLowerCase()!==getAddress(input.expectedWallet).toLowerCase())throw Error('wallet_identity_changed');
+      if(recipient&&status.address?.toLowerCase()===recipient.toLowerCase())throw Error('invalid_transfer_recipient');
       const info=await this.detect(this.provider,token,coreAbi,status.address);
       if(input.action==='transfer'&&(info.phase!=='graduated'||!info.pair))throw Error('transfer_requires_verified_external_market');
       const row={id,requestId:input.requestId,walletId:'primary',walletLabel:'钱包',walletAddress:status.address,token,
-        action:input.action,platform:info.platform,phase:info.phase,createdUtc:new Date().toISOString(),running:true,stage:'preparing',events:[]};
+        action:input.action,requested:{recipient},platform:info.platform,phase:info.phase,createdUtc:new Date().toISOString(),running:true,stage:'preparing',events:[]};
       this.rows.push(row);this.save();this.run(row,info,{action:input.action,token,recipient},status.address);return {jobs:[row]};
     }catch(e){this.locks.delete('primary');throw e;}
+  }
+  async reconcilePosition(id){const row=this.rows.find(r=>r.id===id);if(!row||row.running||row.action!=='transfer'||row.remoteId)return;
+    const file=join(DATA,'wallets',row.walletId,'orders',`position-${row.id}.json`);
+    if(!existsSync(file))return;const s=JSON.parse(readFileSync(file,'utf8'));
+    if(s.step!=='transfer'||s.wallet?.toLowerCase()!==row.walletAddress?.toLowerCase()||s.recipient?.toLowerCase()!==row.requested?.recipient?.toLowerCase())return;
+    const result=await reconcileRecordedCall(this.provider,s,row.walletAddress,args=>baw(args,30000,this.environment()));
+    if(result.kind!=='confirmed')return;
+    verifyTokenTransfer(result.receipt,{token:row.token,wallet:row.walletAddress,recipient:s.recipient,amount:BigInt(s.amountRaw)});
+    row.stage='confirmed';row.events.push({stage:'transfer_confirmed',txHash:result.txHash,reconciled:true},{stage:'confirmed',action:'transfer'});this.save();
   }
   statistics(){const rows=this.rows.filter(r=>r.events?.length);return {total:rows.length,
     confirmed:rows.filter(r=>r.stage==='confirmed').length,failed:rows.filter(r=>r.stage==='error').length,

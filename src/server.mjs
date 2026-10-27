@@ -14,7 +14,11 @@ import { createQuote } from './quotes.mjs';
 import { coreAbi } from './protocol_snapshot.mjs';
 import { detectAgentToken } from './engine/agent_ui/platforms.mjs';
 import {Portfolio,normalizeBalances} from './engine/agent_ui/portfolio.mjs';
-import {positionQuote,convertQuote} from './engine/agent_ui/position_quote.mjs';
+import {positionQuote,convertQuote,positionBalance} from './engine/agent_ui/position_quote.mjs';
+import {MigrationRules} from './migration_rules.mjs';
+import {networkEnvironment} from './engine/network_env.mjs';
+import {Contract} from 'ethers';
+import {ABI,FLAP} from './engine/agent_ui/platforms.mjs';
 
 const port=Number(process.env.PORT||3000),host=process.env.HOST||'127.0.0.1';
 if(!['127.0.0.1','::1','localhost'].includes(host))throw Error('主界面仅支持本机监听，请使用 SSH 隧道访问服务器部署');
@@ -26,7 +30,7 @@ let provider=makeProvider(),market=new MarketData(provider,settings.rpcWs);
 const cliPath=fileURLToPath(new URL('../node_modules/@binance/agentic-wallet/dist/index.js',import.meta.url));
 const sessionDir=process.env.BINANCE_BAW_DIR||join(DATA,'wallets','primary','baw');
 mkdirSync(sessionDir,{recursive:true,mode:0o700});
-const environment=()=>({...process.env,BINANCE_BAW_DIR:sessionDir,BAW_CLI:process.env.BAW_CLI||cliPath,
+const environment=()=>networkEnvironment({...process.env,BINANCE_BAW_DIR:sessionDir,BAW_CLI:process.env.BAW_CLI||cliPath,
   BSC_RPC_HTTP:settings.rpcHttp||'https://bsc-rpc.publicnode.com'});
 const cli=(args,timeout)=>baw(args,timeout,environment());
 const pool=new WalletPool({file:join(DATA,'wallet-profiles.json'),primaryAddress:process.env.EXPECTED_WALLET||null,cli});
@@ -35,6 +39,21 @@ const portfolio=new Portfolio({file:join(DATA,'portfolio-ledger.json'),provider,
   detect:(token,wallet)=>detectAgentToken(provider,token,coreAbi,wallet),
   quote:(info,order)=>positionQuote(provider,info,order),convert:(from,to,amount)=>convertQuote(provider,from,to,amount),
   getJobs:async()=>jobs.rows.filter(j=>(j.walletId||'primary')==='primary')});
+const migrations=new MigrationRules({read:()=>readData('migration-rules.json',[]),write:rows=>writeData('migration-rules.json',rows),
+  orders:async()=>{await jobs.list();return jobs.rows;},canRun:()=>settings.liveTrading,busy:()=>jobs.locks.has('primary'),reconcile:id=>jobs.reconcilePosition(id),
+  execute:input=>jobs.operation(input,{migration:true}),position:async r=>{
+    const s=await pool.status('primary');if(!s.ready)throw Error(s.error||'wallet_not_ready');
+    const info=await detectAgentToken(provider,r.token,coreAbi,s.address);
+    const balance=await positionBalance(provider,info,s.address);
+    const shares=info.platform==='flap'&&info.market&&info.phase!=='curve'?await new Contract(info.market,ABI.FLAP_MARKET,provider).sharesOf(s.address):0n;
+    return {wallet:s.address,phase:info.phase,pair:info.pair,balanceRaw:String(balance),needsClaim:shares>0n};
+  }});
+async function migrationList(){const rows=migrations.list().map(r=>({...r,walletId:'primary',walletLabel:'钱包 1'}));
+  await Promise.all(pool.records.map(async profile=>{try{const data=await pool.request(profile,'/worker/migrations');
+    rows.push(...(data.rules||[]).map(r=>({...r,walletId:profile.id,walletLabel:profile.label})));}
+    catch{rows.push({id:'unavailable-'+profile.id,walletId:profile.id,walletLabel:profile.label,stage:'worker_unavailable',enabled:false});}}));return {rules:rows};}
+async function stopMigration(fields){const profile=pool.get(fields.walletId||'primary');
+  return profile.local?migrations.stop(fields.id):pool.request(profile,'/worker/migrations/stop',{id:fields.id});}
 let portfolioTimer;
 jobs.on('change',()=>{clearTimeout(portfolioTimer);portfolioTimer=setTimeout(async()=>{const s=await pool.status('primary');
   if(s.address)portfolio.ingest(s.address,jobs.rows.filter(j=>(j.walletId||'primary')==='primary')).catch(()=>{});},2000);portfolioTimer.unref?.();});
@@ -64,6 +83,8 @@ async function worker(req,res){if(workerToken.length<32||!equal(req.headers['x-a
   try{const path=new URL(req.url,'http://localhost').pathname;
     if(path==='/worker/status'&&req.method==='GET')return json(res,200,await pool.status('primary'));
     if(path==='/worker/jobs'&&req.method==='GET')return json(res,200,{jobs:await jobs.list()});
+    if(path==='/worker/migrations'&&req.method==='GET')return json(res,200,{rules:migrations.list()});
+    if(path==='/worker/migrations/stop'&&req.method==='POST')return json(res,200,migrations.stop((await body(req)).id));
     if(path==='/worker/holdings'&&req.method==='GET')return json(res,200,await holdings('primary'));
     if(path==='/worker/portfolio'&&req.method==='GET')return json(res,200,await portfolioFor('primary',req.url.includes('refresh=1')));
     if(path==='/worker/position'&&req.method==='POST'){const f=await body(req),s=await pool.status('primary');
@@ -87,6 +108,7 @@ const server=http.createServer(async(req,res)=>{
       if(path==='/api/market')return json(res,200,market.list());
       if(path==='/api/watchlist')return json(res,200,readData('watchlist.json',{favorites:[],blocked:[]}));
       if(path==='/api/orders')return json(res,200,{jobs:await jobs.list()});
+      if(path==='/api/migrations')return json(res,200,await migrationList());
       if(path==='/api/settings')return json(res,200,publicSettings());
       if(path==='/api/statistics')return json(res,200,jobs.statistics());
       if(path==='/api/holdings')return json(res,200,await holdings(url.searchParams.get('walletId')||'primary'));
@@ -105,6 +127,7 @@ const server=http.createServer(async(req,res)=>{
       if(path==='/api/quote'){const order=validateOrder(fields),s=pool.cache.get(order.walletIds[0])?.value;
         const info=await detectAgentToken(provider,order.token,coreAbi,s?.address||ZeroAddress);return json(res,200,await createQuote(provider,info,{...order,address:s?.address||ZeroAddress}));}
       if(path==='/api/orders')return json(res,202,await jobs.submit(fields));
+      if(path==='/api/migrations/stop')return json(res,200,await stopMigration(fields));
       if(path==='/api/approve'){await jobs.approve(fields.jobId);return json(res,200,{ok:true});}
       if(path==='/api/wallet/login')return json(res,200,await pool.signIn(fields.walletId||'primary'));
       if(path==='/api/wallets')return json(res,201,pool.add(fields));
@@ -123,3 +146,4 @@ if(process.env.WORKER_MODE==='1'){if(workerToken.length<32)throw Error('钱包�
   }else ws.listen(Number(process.env.AGENT_WORKER_PORT||4330),process.env.AGENT_WORKER_HOST||'127.0.0.1',()=>console.log('Wallet worker ready'));
 }else server.listen(port,host,()=>console.log(`Agent ID Community ready on local port ${port}`));
 if(process.env.WORKER_MODE!=='1'&&process.env.MARKET_ENABLED!=='0')market.start();
+migrations.start();

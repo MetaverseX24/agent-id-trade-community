@@ -1,15 +1,16 @@
 {
   "name": "agent-id-trade-community",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": false,
   "type": "module",
   "scripts": {
-    "start": "node src/server.mjs",
+    "start": "node scripts/start.mjs --quote",
     "test": "node --test",
     "wallet:add:linux": "node scripts/add-wallet-linux.mjs",
     "live": "node scripts/start.mjs --live",
     "worker": "node scripts/start.mjs --worker",
-    "wallet:add": "node scripts/add-wallet.mjs"
+    "wallet:add": "node scripts/add-wallet.mjs",
+    "setup": "node scripts/setup.mjs"
   },
   "dependencies": {
     "@binance/agentic-wallet": "1.12.0",

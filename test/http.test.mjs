@@ -17,6 +17,8 @@ test('local interface rejects other origins and hides deployment secrets',async(
     assert.equal(response.status,200);assert.equal((await response.json()).maxBuyBNB,'0.2');
     assert.equal((await fetch(base+'/api/settings',{headers:{Origin:'https://evil.invalid'}})).status,403);
     const data=await(await fetch(base+'/api/settings')).json();assert.equal(data.liveTrading,false);
+    assert.deepEqual((await(await fetch(base+'/api/migrations')).json()).rules,[]);
+    assert.equal((await fetch(base+'/api/migrations/stop',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://evil.invalid'},body:'{}'})).status,403);
     const token='0x'+'1'.repeat(40);const added=await fetch(base+'/api/watchlist',{method:'POST',headers:{'Content-Type':'application/json',Origin:base,'X-Agent-CSRF':csrf},
       body:JSON.stringify({token,list:'favorites',enabled:true})});assert.equal(added.status,200);
     assert.deepEqual((await(await fetch(base+'/api/watchlist')).json()).favorites,[token]);

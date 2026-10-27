@@ -41,6 +41,6 @@ export class ExpiredOrders{
   }
 }
 export function orderStatePaths(job,{generic,four}){
-  const ca=String(job.token||'').toLowerCase();if(!/^0x[0-9a-f]{40}$/.test(ca))return [];
+  const ca=String(job.engineToken||job.token||'').toLowerCase();if(!/^0x[0-9a-f]{40}$/.test(ca))return [];
   return [join(generic,`${ca}-${job.action}.json`),...(four?[job.action==='sell'?join(four,`sell-${ca}.json`):join(four,`${ca}-${job.id}.json`)]:[])];
 }

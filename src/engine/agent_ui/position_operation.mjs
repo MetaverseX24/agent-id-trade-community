@@ -1,4 +1,5 @@
-// Private, authenticated wallet-node operations. Never invoked by public trade buttons.
+// Scoped queue operations for an explicitly selected recipient. Binance still
+// enforces its address book, wallet permissions and any App confirmation.
 import {readFileSync,writeFileSync,renameSync,mkdirSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {Contract,Interface,getAddress,ZeroAddress,keccak256,formatUnits} from 'ethers';

@@ -31,7 +31,7 @@ function summary(){const count=selected.size;
   $('rpcBadge').textContent=config.rpcLabel||'公共 RPC';}
 const walletMessage={wallet_duplicate_address:'重复地址，请连接不同钱包',wallet_identity_mismatch:'账号与预期地址不符',developer_mode_unavailable:'请检查开发者模式/限额',
   wallet_session_expired:'登录已过期',agent_id_required:'请领取 Agent ID',trade_all_tokens_disabled:'请开启交易所有代币',
-  wallet_app_confirmation_pending:'等待 App 确认',wallet_status_unavailable:'节点暂不可用'};
+  wallet_app_confirmation_pending:'等待 App 确认',wallet_status_unavailable:'未读到登录状态，可尝试扫码连接'};
 function renderWallets(){const root=$('wallets');root.replaceChildren();
   for(const wallet of wallets){const row=element('div',undefined,`wallet-item ${wallet.ready?'ready':''}`),label=element('label');
     const check=element('input');check.type='checkbox';check.checked=selected.has(wallet.id);check.addEventListener('change',()=>{check.checked?selected.add(wallet.id):selected.delete(wallet.id);summary();});
@@ -55,10 +55,14 @@ function percent(raw,max){if(!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(raw))throw E
   const n=Math.round(Number(raw)*100);if(n<1||n>max)throw Error('比例超出范围');return n;}
 function fields(action,mode,bps){const token=$('token').value.trim();if(!CA.test(token))throw Error('请输入完整的 BSC 合约地址');
   if(!selected.size)throw Error('请至少选中一个钱包');
-  return {token,action,mode,bps,walletIds:[...selected],budgetBNB:mode==='bnb'?$('buyBNB').value.trim():config.maxBuyBNB,requestId:crypto.randomUUID()};}
+  const migration={enabled:action==='buy'&&$('migrationEnabled').checked,recipient:null};
+  if(migration.enabled){migration.recipient=$('migrationRecipient').value.trim();if(!CA.test(migration.recipient))throw Error('请填写完整的自动转出收款地址');}
+  return {token,action,mode,bps,walletIds:[...selected],migration,budgetBNB:mode==='bnb'?$('buyBNB').value.trim():config.maxBuyBNB,requestId:crypto.randomUUID()};}
 async function trade(action,mode,bps){if(busy)return;busy=true;setTradeBusy(true);try{const command=fields(action,mode,bps);
   notice(config.liveTrading?'已发送到交易队列，正在核对路径与币安预览…':'正在生成只读报价，不会签名或下单…');
-  const result=await api('/api/orders',command);notice(`已建立 ${result.jobs.length} 个独立钱包订单，请查看执行状态。`);await refreshOrders();}
+  const result=await api('/api/orders',command);notice(`已建立 ${result.jobs.length} 个独立钱包订单，请查看执行状态。`);
+  if(action==='buy'&&result.jobs.some(j=>j.stage!=='error')){$('migrationEnabled').checked=false;$('migrationRecipientBox').hidden=true;}
+  await refreshOrders();refreshMigrations();}
   catch(error){notice(error.message);}finally{busy=false;setTradeBusy(false);}}
 function setTradeBusy(value){for(const e of document.querySelectorAll('[data-buy],[data-sell],#buyCustom,#sellCustom,#buyByBNB'))e.disabled=value;}
 for(const button of document.querySelectorAll('[data-buy]'))button.addEventListener('click',()=>trade('buy','percent',Number(button.dataset.buy)));
@@ -76,7 +80,8 @@ async function inspect(){const token=$('token').value.trim();if(!CA.test(token))
   info=await api('/api/inspect',{token});$('identified').textContent=`${info.label} · ${phase(info.phase)} · ${info.token} · 底池 ${info.quote}${info.canTrade?'':' · 当前路径未验证'}`;
   detailToken=info.token;$('selectedName').textContent=info.symbol||short(info.token);refreshDetail();}
 $('inspect').addEventListener('click',()=>inspect().catch(e=>notice(e.message)));
-$('token').addEventListener('input',()=>{info=null;$('identified').textContent='地址已变更，交易提交时会重新核对平台和阶段。';});
+$('token').addEventListener('input',()=>{info=null;$('identified').textContent='地址已变更，交易提交时会重新核对平台和阶段。';$('migrationEnabled').checked=false;$('migrationRecipientBox').hidden=true;});
+$('migrationEnabled').addEventListener('change',()=>{$('migrationRecipientBox').hidden=!$('migrationEnabled').checked;});
 function renderMarkets(){const platform=$('platformFilter').value,p=$('phaseFilter').value,q=$('quoteFilter').value,search=$('marketSearch').value.trim().toLowerCase();
   const list=tokens.filter(t=>(platform==='all'||t.platform===platform)&&(p==='all'||(p==='curve'?['curve','standard_curve'].includes(t.phase):t.phase===p))&&
     (q==='all'||(q==='bnb'?t.quote==='BNB':t.quote!=='BNB'))&&(!search||`${t.symbol} ${t.name} ${t.token}`.toLowerCase().includes(search))&&(!$('favoritesOnly').checked||watchlist.favorites.includes(t.token.toLowerCase()))&&(!$('minMcap').value||Number(t.marketCapUsd)>=Number($('minMcap').value))&&(!$('maxMcap').value||t.marketCapUsd>0&&Number(t.marketCapUsd)<=Number($('maxMcap').value)));
@@ -116,6 +121,9 @@ async function refreshDetail(){if(!detailToken||detailBusy)return;detailBusy=tru
 }catch(error){$('chartSource').textContent=`行情暂不可用：${error.message}`;}finally{detailBusy=false;if(token!==detailToken)refreshDetail();}}
 function eventText(e){if(e.stage==='error')return `未完成：${humanError(e.error)}`;
   if(['app_confirmation_expired','prior_confirmation_closed'].includes(e.stage))return '手机确认已过期，已核对没有上链；需要交易时请重新点击';
+  if(e.stage==='transfer_submitting')return '正在把该币剩余持仓转到你选定的地址';
+  if(e.stage==='transfer_confirmed')return '转出已由链上回执确认';
+  if(e.stage==='claim_fill')return 'Flap 份额已领取为代币';
   if(e.stage==='funding_returned_buy_not_submitted')return '没有买入；本单新换的底池币已换回 BNB';
   if(e.stage==='native_conversion_confirmed')return `本单底池币已换回 ${e.receivedBNB} BNB`;
   if(e.stage==='native_settlement_complete')return '本单所得已处理为原生 BNB';
@@ -132,7 +140,7 @@ function renderOrders(){const root=$('orders'),approvals=$('approvals');root.rep
   const status=$('executionStatus');status.replaceChildren();
   const latest=new Map();for(const o of orders)if(selected.has(o.walletId)&&!latest.has(o.walletId))latest.set(o.walletId,o);
   for(const o of latest.values())status.append(element('p',`${o.walletLabel||'钱包'} · ${short(o.token)} · ${eventText(o.events?.at(-1)||{stage:o.stage})}`));
-  for(const order of orders){const box=element('div',undefined,'order');box.append(element('strong',`${order.walletLabel||'钱包'} · ${order.action==='buy'?'买入':'卖出'} · ${short(order.token)}`),element('small',` · ${new Date(order.createdUtc).toLocaleString()}`));
+  for(const order of orders){const box=element('div',undefined,'order');box.append(element('strong',`${order.walletLabel||'钱包'} · ${{buy:'买入',sell:'卖出',transfer:'转出',claim:'领取'}[order.action]||'操作'} · ${short(order.token)}`),element('small',` · ${new Date(order.createdUtc).toLocaleString()}`));
     const detail=element('details'),sum=element('summary',`执行详情 · ${order.id}`);detail.append(sum);
     for(const e of order.events||[]){detail.append(element('div',`${eventText(e)}${e.elapsedMs!==undefined?' · '+(e.elapsedMs/1000).toFixed(2)+'秒':''}`,'event'));
       if(/^0x[0-9a-f]{64}$/i.test(e.txHash||'')){const link=element('a','查看链上交易 ↗');link.href=`https://bscscan.com/tx/${e.txHash}`;link.target='_blank';link.rel='noopener noreferrer';detail.append(link);}}
@@ -156,6 +164,17 @@ async function refreshHoldings(){const root=$('holdings');root.replaceChildren()
     }catch(error){body.replaceChildren(element('p',error.message,'hint'));}}
 }
 $('refreshHoldings').addEventListener('click',refreshHoldings);
+async function refreshMigrations(){const root=$('migrationRules');try{const data=await api('/api/migrations');root.replaceChildren();
+  const stages={waiting_buy:'等待买入成交',watching:'等待进入外盘',waiting_wallet:'等待钱包空闲',submitting:'正在提交转出',transferring:'转出中',
+    waiting_app:'请在币安 App 确认',completed:'已转出',disabled:'已关闭',disabled_on_new_buy:'新买入未勾选，已关闭旧任务',paused_quote_only:'仅报价模式，已暂停',
+    needs_attention:'需要处理，请核对 App、地址簿和交易记录',submission_unknown:'提交结果待核对，请勿重发',check_retrying:'暂未读到状态，自动重查',
+    no_position:'没有剩余持仓',buy_not_filled:'买入未成交',buy_history_missing:'缺少买入记录，请核对',stopping_after_pending:'已停止后续操作；已提交的转出仍需核对',worker_unavailable:'钱包节点暂不可用或需要升级'};
+  for(const r of data.rules||[]){const line=element('div',undefined,'order');line.append(element('strong',`${r.walletLabel||'钱包'} · ${short(r.token)}`),
+    element('p',stages[r.stage]||r.stage));if(r.recipient)line.append(element('small','收款地址：'+r.recipient));
+    if(/^0x[0-9a-f]{64}$/i.test(r.txHash||'')){const link=element('a','查看转出回执 ↗');link.href='https://bscscan.com/tx/'+r.txHash;link.target='_blank';link.rel='noopener noreferrer';line.append(link);}
+    if(r.enabled){const b=element('button','关闭自动转出','secondary');b.addEventListener('click',async()=>{b.disabled=true;try{await api('/api/migrations/stop',{id:r.id,walletId:r.walletId});await refreshMigrations();}catch(e){notice(e.message);b.disabled=false;}});line.append(b);}root.append(line);}
+  if(!data.rules?.length)root.append(element('p','尚未启用；买入时可以单独勾选。','hint'));
+}catch(error){root.textContent=error.message;}}
 function renderSettings(){summary();if(loadedSettings)return;loadedSettings=true;$('maxBuy').value=config.maxBuyBNB;$('gasReserve').value=config.gasReserveBNB;
   $('slippage').value=String(config.slippageBps/100);$('liveTrading').checked=config.liveTrading;$('rpcStatus').textContent=config.rpcConfigured?'已配置私有 RPC；地址和密钥不会返回浏览器。':'使用公共 RPC。';}
 $('saveTrading').addEventListener('click',async()=>{try{config=await api('/api/settings',{maxBuyBNB:$('maxBuy').value.trim(),gasReserveBNB:$('gasReserve').value.trim(),slippageBps:percent($('slippage').value.trim(),5000)});notice('交易设置已保存');summary();}catch(e){notice(e.message);}});
@@ -167,5 +186,6 @@ async function start(){try{const data=await api('/api/state');config=data.settin
 $('chartInterval').addEventListener('change',refreshDetail);
 $('favoriteSelected').addEventListener('click',async()=>{if(!detailToken)return notice('请先选择代币');try{const token=detailToken.toLowerCase(),enabled=!watchlist.favorites.includes(token);watchlist=await api('/api/watchlist',{token,list:'favorites',enabled});$('favoriteSelected').textContent=enabled?'取消收藏':'收藏';renderMarkets();}catch(e){notice(e.message);}});
 api('/api/watchlist').then(data=>{watchlist=data;renderMarkets();}).catch(()=>{});
-start();const events=new EventSource('/api/events');events.onmessage=e=>{try{const data=JSON.parse(e.data);if(data.type==='orders'){orders=data.orders;renderOrders();}}catch{}};
+start();refreshMigrations();const events=new EventSource('/api/events');events.onmessage=e=>{try{const data=JSON.parse(e.data);if(data.type==='orders'){orders=data.orders;renderOrders();}}catch{}};
 setInterval(refreshMarkets,5000);setInterval(refreshWallets,10000);setInterval(refreshOrders,3000);setInterval(refreshDetail,10000);
+setInterval(refreshMigrations,5000);
