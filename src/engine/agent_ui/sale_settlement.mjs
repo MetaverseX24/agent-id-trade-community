@@ -106,6 +106,7 @@ export function recordBuyFundingReceipt(state,receipt,wallet){const f=state.quot
 }
 export function unusedAcquiredQuote(f){const unused=BigInt(f.acquiredRaw||0)-BigInt(f.spentRaw||0);return unused>0n?unused:0n;}
 export async function settleBuySurplus(options){const {provider,wallet,state,persist,emit}=options,f=state.quoteFunding;
+  if(state.settlement?.kind==='buy_surplus')return settleSaleToBNB(options);
   if(!f?.buyTxHash)return true;
   const unused=unusedAcquiredQuote(f);if(unused===0n)return true;
   const current=await new Contract(f.asset,ABI.ERC20,provider).balanceOf(wallet);

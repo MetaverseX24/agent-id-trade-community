@@ -22,6 +22,7 @@ export class WalletPool {
   constructor({ file, primaryAddress, primaryLabel = '钱包 1', cli = baw }) {
     this.file=file; this.cli=cli; this.primaryAddress=primaryAddress;
     this.cache=new Map(); this.logins=new Map(); this.pending=new Map();
+    this.facts=new Map();
     this.pairingPending=new Map();
     try { this.records=JSON.parse(readFileSync(file,'utf8')); } catch { this.records=[]; }
     this.records=this.records.filter(x=>validId(x.id) && x.id!=='primary' && x.endpoint && x.token);
@@ -88,6 +89,9 @@ export class WalletPool {
               this.cli(['wallet','agent-id']),this.cli(['wallet','tx-lock','--binanceChainId','56']).catch(()=>({status:'UNKNOWN'})),
             ]);
             const actual=address.addresses?.find(x=>String(x.binanceChainId)==='56')?.address;
+            this.facts.set(id,{chainId:56,wallet:actual,checkedAt:Date.now(),status,
+              addresses:{addresses:(address.addresses||[]).filter(a=>String(a.binanceChainId)==='56').map(a=>({binanceChainId:'56',address:a.address}))},
+              agent:{claimed:agent.claimed===true},settings:{devMode:settings.devMode,tradeAllTokens:settings.tradeAllTokens,sessionExpireTime:settings.sessionExpireTime}});
             const identity=!!actual&&(!profile.address||same(actual,profile.address));
             const dev=!!settings.devMode?.enabled&&!settings.devMode.balanceExceeded&&deadline(settings.devMode.expiresAt)>Date.now()+120_000;
             const session=deadline(settings.sessionExpireTime)>Date.now()+120_000;

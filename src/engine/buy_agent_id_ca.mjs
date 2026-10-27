@@ -11,6 +11,8 @@ import { FailoverRpcProvider } from './rpc_failover.mjs';
 import { makeBuyPlan } from './trade_logic.mjs';
 import { baw, previewDiagnostics, submitContractCall } from './wallet_cli.mjs';
 import { waitForBrowserApproval } from './agent_ui/approval_gate.mjs';
+import {walletSnapshot} from './agent_ui/preflight_snapshot.mjs';
+import {reconcileRecordedCall} from './agent_ui/recovery.mjs';
 
 const REGISTRY = getAddress('0x912CEf0C3aE9Ab6eB3Ec87cab69371cFb317Ab94');
 const CORE = getAddress('0xebe7b6C1089D9F72aD07f34E36d898e44E5e27f3');
@@ -75,13 +77,16 @@ function parseArgs(argv) {
   return { token: getAddress(rawToken), mode: modes[0] || '--check', budget, percentBps, intent, manualConfirm };
 }
 
-function assertNoUnresolvedBuy(token) {
+async function assertNoUnresolvedBuy(provider,token) {
   if (!existsSync(STATE_DIR)) return;
   for (const file of readdirSync(STATE_DIR)) {
     if (!file.startsWith(token.toLowerCase()) || !file.endsWith('.json')) continue;
     const previous = JSON.parse(readFileSync(join(STATE_DIR, file), 'utf8'));
-    if (!['confirmed', 'reverted'].includes(previous.stage))
-      throw new Error('previous_buy_unresolved_check_status_first');
+    if (['confirmed','reverted','confirmation_expired_unbroadcast'].includes(previous.stage))continue;
+    const result=await reconcileRecordedCall(provider,{...previous,to:CORE},WALLET,baw);
+    if(result.kind==='confirmation_closed'){save(join(STATE_DIR,file),{...previous,stage:'confirmation_expired_unbroadcast',reconciliation:result});continue;}
+    if(result.kind==='reverted'){save(join(STATE_DIR,file),{...previous,stage:'reverted',txHash:result.txHash});continue;}
+    throw new Error('previous_buy_unresolved_check_status_first');
   }
 }
 
@@ -132,6 +137,7 @@ async function checkPinnedContracts(provider, registry, toolsAddress, zapAddress
 }
 
 export async function preflight(provider, token) {
+  const snapshot=walletSnapshot(baw,WALLET);
   const registry = new Contract(REGISTRY, abi('OpenFourRegistry'), provider);
   const core = new Contract(CORE, abi('OpenFourCore'), provider);
   const manager = new Contract(MANAGER, MANAGER_ABI, provider);
@@ -140,8 +146,7 @@ export async function preflight(provider, token) {
     provider.getBlockNumber(), registry.openFourCore(), registry.openFourTool(),
     core.zapRouter(), core.wrappedNative(), registry.getPreset(PRESET),
     manager.isPresetWhitelistEnabled(PRESET), core.paused(), provider.getBalance(WALLET),
-    baw(['wallet', 'status']), baw(['wallet', 'settings']), baw(['wallet', 'address']),
-    baw(['wallet', 'agent-id']),
+    ...[0,1,2,3].map(i=>snapshot.then(rows=>rows[i])),
   ]);
   if (!same(coreAddress, CORE) || whitelist || paused || !preset.active ||
       !preset.createEnabled) throw new Error('core_preset_or_whitelist_blocked');
@@ -228,7 +233,7 @@ async function main() {
     if (mode === '--status') return await reconcile(provider, token, path);
     if (mode === '--execute' && existsSync(path))
       throw new Error('duplicate_token_attempt_check_status_first');
-    if (mode === '--execute') assertNoUnresolvedBuy(token);
+    if (mode === '--execute') await assertNoUnresolvedBuy(provider,token);
     const { head, core, toolsAddress, cfg, options, bnbBalance, beforeToken, supply } =
       await preflight(provider, token);
     const balanceBudget = bnbBalance - GAS_RESERVE;
@@ -309,7 +314,7 @@ async function main() {
         try{await reconcile(provider,token,path);}catch{output({stage:'reconciliation_waiting',token});}
         const latest=JSON.parse(readFileSync(path,'utf8'));
         if(['confirmed','reverted'].includes(latest.stage))break;
-        await new Promise(r=>setTimeout(r,latest.txHash?700:2000));
+        await new Promise(r=>setTimeout(r,latest.txHash?(Date.now()-latest.startedMs<5000?150:500):2000));
       }
     } catch (error) {
       if (submitting) save(path, { ...state, stage: 'submission_unknown' });

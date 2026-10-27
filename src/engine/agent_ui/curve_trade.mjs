@@ -8,9 +8,11 @@ import { waitForBrowserApproval } from './approval_gate.mjs';
 import { assertProtocolPins } from './protocol_pins.mjs';
 import { findGross, resolveBuyQuote } from './quote_search.mjs';
 import { bestPathQuote, quotePaths, quoteCapacity } from './quote_paths.mjs';
-import {prepareSaleSettlement,recordSaleReceipt,recordBuyFundingReceipt,recordNativeReceipt,settleSaleToBNB,settleBuySurplus} from './sale_settlement.mjs';
-import { canRetryAfterApproval } from './recovery.mjs';
+import {prepareSaleSettlement,recordSaleReceipt,recordBuyFundingReceipt,recordNativeReceipt,settleSaleToBNB,settleBuySurplus,netReceived} from './sale_settlement.mjs';
+import { canRetryAfterApproval,reconcileRecordedCall,expiredCallMayRetry } from './recovery.mjs';
 import {gangV2BuyQuote,gangV2SellQuote,resolveGangBuyQuote} from './gang_curve.mjs';
+import {walletSnapshot} from './preflight_snapshot.mjs';
+import {prepareFundedBuy} from './funded_buy.mjs';
 import { ABI, BNB, FLAP, FOUR_CORE, GANG_PADS, IFACE, ROUTER, WALLET, WBNB,
   detectAgentToken, verifiedPair } from './platforms.mjs';
 
@@ -57,10 +59,7 @@ function save(path, value) {
   renameSync(temp, path);
 }
 async function preflight(provider) {
-  const [status, settings, addresses, agentId, network] = await Promise.all([
-    baw(['wallet','status']), baw(['wallet','settings']),
-    baw(['wallet','address']), baw(['wallet','agent-id']), provider.getNetwork(),
-  ]);
+  const [[status,settings,addresses,agentId],network]=await Promise.all([walletSnapshot(baw,WALLET),provider.getNetwork()]);
   if (network.chainId !== 56n || status.status !== 'CONNECTED' ||
       !addresses.addresses?.some(x => String(x.binanceChainId) === '56' && same(x.address,WALLET)) ||
       !agentId.claimed) throw new Error('wallet_or_agent_id_invalid');
@@ -105,9 +104,11 @@ async function submit(provider, path, state, label, to, value, data) {
       return waitForBrowserApproval(details,{from:WALLET,to,valueWei:value,inputData:data,step:label,
         proceedsWei:state.settlement?.amountRaw,proceedsTxHash:state.settlement?.saleTxHash,settlementKind:state.settlement?.kind});
     },
-    beforeExecute: preview => {
+    beforeExecute: async preview => {
       if (preview.parsedTx?.contractAddress &&
           !same(preview.parsedTx.contractAddress,to)) throw new Error('preview_target_mismatch');
+      if(state.unit==='shares'&&['buy','sell'].includes(label))state.sharesBefore=String(await new Contract(state.market,ABI.FLAP_MARKET,provider).sharesOf(WALLET));
+      if(label==='claim')state.claimTokenBefore=String(await new Contract(state.token,ABI.ERC20,provider).balanceOf(WALLET));
       Object.assign(state, { stage:`${label}_submitting`, step:label, fromBlock:head,
         startedMs:Date.now(), to, value:value.toString(), inputHash:keccak256(data),
         requestId:preview.requestId, txHash:null, orderId:null });
@@ -125,7 +126,7 @@ async function submit(provider, path, state, label, to, value, data) {
   while (Date.now()<deadline && !match) {
     try { match=await matchingReceipt(provider,state); }
     catch { output({stage:'reconciliation_waiting',reason:'rpc_or_wallet_history_unavailable'}); }
-    if (!match) await new Promise(resolve=>setTimeout(resolve,state.txHash?700:2000));
+    if (!match) await new Promise(resolve=>setTimeout(resolve,state.txHash?(Date.now()-state.startedMs<5000?150:500):2000));
   }
   if (!match) { output({ stage:'receipt_unresolved', orderId:state.orderId,
     txHash:state.txHash, message:'Check Binance App and chain before retrying.' }); return false; }
@@ -136,10 +137,25 @@ async function submit(provider, path, state, label, to, value, data) {
     throw new Error('transaction_reverted');
   }
   if(label==='sell')recordSaleReceipt(state,receipt,WALLET);
+  state.nativeSpentWei=String(BigInt(state.nativeSpentWei||0)+value);
+  if(['wrap','get_quote'].includes(label)&&state.quoteFunding){
+    const got=label==='wrap'?value:netReceived(receipt,state.quoteFunding.asset,WALLET);
+    if(got<=0n)throw Error('quote_swap_delivered_zero');
+    state.quoteFunding.acquiredRaw=String(BigInt(state.quoteFunding.acquiredRaw||0)+got);
+    state.quoteFunding.fundingTxHash=state.txHash;
+  }
   if(label==='buy')recordBuyFundingReceipt(state,receipt,WALLET);
   recordNativeReceipt(state,receipt,label);
+  if(state.unit==='shares'&&['buy','sell'].includes(label)){
+    const after=await new Contract(state.market,ABI.FLAP_MARKET,provider).sharesOf(WALLET),before=BigInt(state.sharesBefore);
+    output({stage:'trade_fill',txHash:state.txHash,unit:'shares',quantityRaw:String(label==='buy'?after-before:before-after),quoteRaw:state.value});
+  }
+  if(label==='claim'){
+    const after=await new Contract(state.token,ABI.ERC20,provider).balanceOf(WALLET),received=after-BigInt(state.claimTokenBefore||0);
+    if(received>0n)output({stage:'claim_fill',txHash:state.txHash,token:state.token,quantityRaw:String(received)});
+  }
   state.stage = `${label}_confirmed`; save(path,state);
-  output({ stage:state.stage, txHash:state.txHash });
+  output({ stage:state.stage, txHash:state.txHash,confirmationMs:Date.now()-state.startedMs });
   return true;
 }
 async function budgetAfterReserve(provider, requested) {
@@ -155,10 +171,31 @@ async function ensureAllowance(provider,path,state,token,spender,amount) {
   if ((await erc.allowance(WALLET,spender)) >= amount) return true;
   return submit(provider,path,state,'approve',token,0n,IFACE.erc20.encodeFunctionData('approve',[spender,amount]));
 }
+async function nativeRemaining(provider,state,plan){const spent=BigInt(state.nativeSpentWei||0),left=plan.budget>spent?plan.budget-spent:0n;
+  const balance=await provider.getBalance(WALLET),available=balance>RESERVE?balance-RESERVE:0n;return left<available?left:available;}
+async function fundedBuy(provider,path,state,info,plan,initialGross,spender,refresh){
+  const erc=new Contract(info.quote,ABI.ERC20,provider);
+  try{return await prepareFundedBuy({initialGross,slippageBps:SLIPPAGE,
+    capacity:async()=>{const [remaining,existing]=await Promise.all([nativeRemaining(provider,state,plan),erc.balanceOf(WALLET)]);
+      return quoteCapacity(provider,info.quote,plan.budget,remaining,existing);},
+    balance:()=>erc.balanceOf(WALLET),fund:async cap=>acquireQuote(provider,path,state,info.quote,cap,await nativeRemaining(provider,state,plan)),
+    approve:cap=>ensureAllowance(provider,path,state,info.quote,spender,cap),refresh,emit:output});
+  }catch(error){const f=state.quoteFunding;
+    if(f?.fundingTxHash&&BigInt(f.acquiredRaw||0)>0n&&state.step!=='buy'&&
+      ['budget_insufficient_for_target','buy_price_slippage_cap_exceeded','price_changed_during_funding','quote_acquired_but_target_unavailable','market_migrated_during_funding'].includes(error.message)){
+      f.buyTxHash=f.fundingTxHash;f.spentRaw='0';save(path,state);
+      try{const restored=await settleBuySurplus({provider,wallet:WALLET,state,slippageBps:SLIPPAGE,
+        submit:(label,to,data)=>submit(provider,path,state,label,to,0n,data),persist:()=>save(path,state),emit:output});
+        if(restored){state.stage='funding_returned_buy_not_submitted';save(path,state);output({stage:state.stage,reason:error.message});}
+      }catch{output({stage:'funding_return_needs_review',reason:error.message});}
+    }
+    throw error;
+  }
+}
 async function acquireQuote(provider,path,state,quote,need,nativeBudget) {
   const erc = new Contract(quote,ABI.ERC20,provider);
   const before = await erc.balanceOf(WALLET);
-  state.quoteFunding={asset:quote,initialRaw:String(before),acquiredRaw:'0'};save(path,state);
+  if(!state.quoteFunding)state.quoteFunding={asset:quote,initialRaw:String(before),acquiredRaw:'0'};save(path,state);
   if(before>=need){output({stage:'quote_balance_reused',quoteAsset:quote,amount:need.toString()});return need;}
   const missing=need-before;
   if (same(quote,WBNB)) {
@@ -167,7 +204,6 @@ async function acquireQuote(provider,path,state,quote,need,nativeBudget) {
       new Contract(WBNB,['function deposit()'],provider).interface.encodeFunctionData('deposit')))
       return null;
     const available=await erc.balanceOf(WALLET);
-    state.quoteFunding.acquiredRaw=String(available-before);save(path,state);
     if (available<need) throw new Error('wrapped_quote_balance_mismatch');
     return need;
   }
@@ -180,7 +216,6 @@ async function acquireQuote(provider,path,state,quote,need,nativeBudget) {
     [minOut(out),route.path,WALLET,BigInt(Math.floor(Date.now()/1000)+120)]);
   if (!await submit(provider,path,state,'get_quote',ROUTER,required,data)) return null;
   const available=await erc.balanceOf(WALLET);
-  state.quoteFunding.acquiredRaw=String(available-before);save(path,state);
   if (available<=before) throw new Error('quote_swap_delivered_zero');
   return available;
 }
@@ -213,19 +248,12 @@ async function buyFlap(provider,info,plan,path,state) {
     return submit(provider,path,state,'buy',FLAP.portal,gross,
       IFACE.flapPortal.encodeFunctionData('buy',[info.market,minOut(expectedShares)]));
   }
-  const acquired=await acquireQuote(provider,path,state,quoteAsset,gross,native);
-  if (acquired===null) return false;
-  if (acquired<gross) {
-    if (plan.percent!==null && (await quote(acquired))<desired)
-      throw new Error('quote_acquired_but_target_unavailable');
-    gross=acquired;
-    expectedShares=await quote(gross);
-  }
-  if (!await ensureAllowance(provider,path,state,quoteAsset,info.market,gross)) return false;
-  const freshHeld=await market.sharesOf(WALLET),freshDesired=target-freshHeld;
-  if(freshDesired<=0n)throw Error('flap_target_already_held');
-  const refreshed=await resolveBuyQuote(gross,freshDesired,quote,plan.percent!==null);
-  gross=refreshed.gross;expectedShares=refreshed.output;
+  const ready=await fundedBuy(provider,path,state,{...info,quote:quoteAsset},plan,gross,info.market,async cap=>{
+    const freshHeld=await market.sharesOf(WALLET),freshDesired=target-freshHeld;
+    if(freshDesired<=0n)throw Error('flap_target_already_held');
+    return resolveBuyQuote(cap,freshDesired,quote,plan.percent!==null);
+  });
+  if(!ready)return false;gross=ready.gross;expectedShares=ready.output;
   return submit(provider,path,state,'buy',FLAP.portal,0n,
     IFACE.flapPortal.encodeFunctionData('buyWithQuote',
       [info.market,gross,minOut(expectedShares)]));
@@ -269,24 +297,13 @@ async function buyGang(provider,info,plan,path,state) {
   if (expected<=0n) throw new Error('gang_zero_quote');
   output({stage:'quote',platform:'gang',expectedTokens:formatEther(expected),
     grossQuote:gross.toString(),quoteAsset:info.quote});
-  const acquired=await acquireQuote(provider,path,state,info.quote,gross,native);
-  if (acquired===null) return false;
-  if (acquired<gross) {
-    if (plan.percent!==null && quote(acquired)<desired)
-      throw new Error('quote_acquired_but_target_unavailable');
-    gross=acquired;
-    expected=quote(gross);
-  }
-  if (!await ensureAllowance(provider,path,state,info.quote,pad.address,gross)) return false;
-  // Funding and approval take time. Re-price the target against the latest curve.
-  const [latestCurve,latestRoom,latestHeld,available]=await Promise.all([launchpad.curves(info.token),
-    launchpad.walletRoom(info.token,WALLET),erc.balanceOf(WALLET),new Contract(info.quote,ABI.ERC20,provider).balanceOf(WALLET)]);
-  if(latestCurve.graduated)throw Error('market_migrated_during_funding');
-  const latestDesired=target-latestHeld;
-  if(latestDesired<=0n)throw Error('gang_target_already_held');
-  const cap=gross<available?gross:available;
-  const fresh=resolveGangBuyQuote(latestCurve,cap,latestDesired,latestRoom,plan.percent!==null);
-  gross=fresh.gross;expected=fresh.output;
+  const ready=await fundedBuy(provider,path,state,info,plan,gross,pad.address,async cap=>{
+    const [latestCurve,latestRoom,latestHeld]=await Promise.all([launchpad.curves(info.token),launchpad.walletRoom(info.token,WALLET),erc.balanceOf(WALLET)]);
+    if(latestCurve.graduated)throw Error('market_migrated_during_funding');
+    const wanted=target-latestHeld;if(wanted<=0n)throw Error('gang_target_already_held');
+    return resolveGangBuyQuote(latestCurve,cap,wanted,latestRoom,plan.percent!==null);
+  });
+  if(!ready)return false;gross=ready.gross;expected=ready.output;
   output({stage:'quote_refreshed',platform:'gang',grossQuote:String(gross),expectedTokens:formatEther(expected)});
   return submit(provider,path,state,'buy',pad.address,0n,
     IFACE.gangV2.encodeFunctionData('buy',[info.token,gross,minOut(expected)]));
@@ -340,14 +357,13 @@ async function tradeStandardFlap(provider,info,plan,path,state) {
       gross=best.gross;
     }
     if (!nativeInput) {
-      const acquired=await acquireQuote(provider,path,state,input,gross,native);
-      if (acquired===null) return false;
-      if (acquired<gross) throw new Error('quote_acquired_but_target_unavailable');
-      if (!await ensureAllowance(provider,path,state,input,FLAP.standardPortal,gross)) return false;
+      const ready=await fundedBuy(provider,path,state,info,plan,gross,FLAP.standardPortal,async cap=>{
+        if(plan.percent===null)return {gross:cap,output:await quote(cap)};
+        const [supply,held]=await Promise.all([token.totalSupply(),token.balanceOf(WALLET)]);
+        const desired=supply*plan.percent/10000n-held;if(desired<=0n)throw Error('target_already_held');
+        return resolveBuyQuote(cap,desired,quote,true);
+      });if(!ready)return false;gross=ready.gross;
     }
-    if(plan.percent!==null){const [supply,held]=await Promise.all([token.totalSupply(),token.balanceOf(WALLET)]);
-      const desired=supply*plan.percent/10000n-held;if(desired<=0n)throw Error('target_already_held');
-      const fresh=await findGross(gross,desired,quote);if(!fresh)throw Error('quote_changed_target_unavailable');gross=fresh.gross;}
     const expected=await quote(gross);
     output({stage:'quote',platform:'flap',phase:'standard_curve',
       expectedTokens:expected.toString(),grossQuote:gross.toString(),quoteAsset:input});
@@ -425,10 +441,22 @@ async function main() {
   try {
     if (existsSync(path)) {
       const prior=JSON.parse(readFileSync(path,'utf8'));
-      if (prior.stage!=='completed') {
-        if (!await canRetryAfterApproval(provider,prior,WALLET))
-          throw new Error('prior_trade_unresolved_check_chain');
-        output({stage:'prior_approval_reconciled',txHash:prior.txHash});
+      if (!['completed','confirmation_expired_unbroadcast','funding_returned_buy_not_submitted'].includes(prior.stage)) {
+        if(await canRetryAfterApproval(provider,prior,WALLET))output({stage:'prior_approval_reconciled',txHash:prior.txHash});
+        else{const resolved=await reconcileRecordedCall(provider,prior,WALLET,baw);
+          if(resolved.kind==='confirmation_closed'&&expiredCallMayRetry(prior)){prior.stage='confirmation_expired_unbroadcast';prior.reconciliation=resolved;save(path,prior);
+            output({stage:'prior_confirmation_closed',orderId:prior.orderId});}
+          else if(resolved.kind==='confirmed'&&['buy','sell'].includes(prior.step)){
+            prior.txHash=resolved.txHash;
+            if(prior.step==='sell')recordSaleReceipt(prior,resolved.receipt,WALLET);else recordBuyFundingReceipt(prior,resolved.receipt,WALLET);
+            output({stage:`${prior.step}_confirmed`,txHash:resolved.txHash,reconciled:true});
+            const options={provider,wallet:WALLET,state:prior,slippageBps:SLIPPAGE,submit:(label,to,data)=>submit(provider,path,prior,label,to,0n,data),persist:()=>save(path,prior),emit:output};
+            const done=prior.action==='sell'?(prior.settlement?await settleSaleToBNB(options):true):await settleBuySurplus(options);
+            if(done){prior.stage='completed';save(path,prior);output({stage:'confirmed',token:plan.token,action:prior.action,txHash:resolved.txHash,reconciled:true});}return;
+          }else if(resolved.kind==='reverted'||(resolved.kind==='confirmed'&&['approve','wrap','get_quote','claim'].includes(prior.step))){
+            prior.stage='prior_call_reconciled';prior.reconciliation={kind:resolved.kind,txHash:resolved.txHash};save(path,prior);output({stage:'prior_call_reconciled',txHash:resolved.txHash});
+          }else throw new Error('prior_trade_unresolved_check_chain');
+        }
       }
     }
     const [,info]=await Promise.all([preflight(provider),detectAgentToken(provider,plan.token,FOUR_ABI)]);
@@ -436,7 +464,7 @@ async function main() {
     if (plan.percent>100n && info.platform!=='flap')
       throw new Error('target_percent_out_of_range');
     if (info.platform==='four' && info.phase==='curve') throw new Error('four_curve_use_existing_adapter');
-    const state={version:1,intent:plan.intent,token:info.token,platform:info.platform,
+    const state={version:1,intent:plan.intent,token:info.token,platform:info.platform,unit:info.unit||'token',market:info.market||null,
       action:plan.action,stage:'preflight',createdUtc:new Date().toISOString()};
     let ok;
     if (info.platform==='flap' && info.phase==='standard_curve')

@@ -10,6 +10,7 @@ import { detectAgentToken } from './engine/agent_ui/platforms.mjs';
 import { coreAbi } from './protocol_snapshot.mjs';
 import { previewRiskState } from './engine/preview_policy.mjs';
 import { makeWorkflowConsent } from './engine/agent_ui/workflow_consent.mjs';
+import {ExpiredOrders,orderStatePaths} from './engine/agent_ui/expired_orders.mjs';
 
 export function validateOrder(input,maxBuy=settings.maxBuyBNB){
   const token=getAddress(input.token),action=input.action;
@@ -26,11 +27,13 @@ export function validateOrder(input,maxBuy=settings.maxBuyBNB){
 export class Jobs extends EventEmitter{
   constructor({provider,pool,quote,environment,detect=detectAgentToken}){super();this.provider=provider;this.pool=pool;this.quote=quote;this.environment=environment;this.detect=detect;
     this.rows=readData('orders.json',[]);this.children=new Map();this.locks=new Map();
+    this.expired=new ExpiredOrders({provider,cli:args=>pool.cli(args),save:()=>this.save(),paths:job=>
+      orderStatePaths(job,{generic:join(DATA,'wallets',job.walletId,'orders'),four:join(DATA,'wallets',job.walletId,'four-orders')})});
     for(const row of this.rows)if(row.running){row.running=false;row.stage='interrupted_check_chain';row.awaitingApproval=false;}
   }
   save(){writeData('orders.json',this.rows.slice(-200));this.emit('change');}
-  async list(){await Promise.all(this.pool.records.map(async profile=>{
-    const current=this.rows.filter(r=>r.walletId===profile.id&&(r.running||['submission_unknown','interrupted_check_chain'].includes(r.stage)));if(!current.length)return;
+  async list(){await this.expired.check(this.rows);await Promise.all(this.pool.records.map(async profile=>{
+    const current=this.rows.filter(r=>r.walletId===profile.id&&(r.running||['submission_unknown','receipt_unresolved','interrupted_check_chain'].includes(r.stage)||String(r.stage).endsWith('app_confirmation_pending')));if(!current.length)return;
     try{const data=await this.pool.request(profile,'/worker/jobs');for(const local of current){const remote=data.jobs?.find(x=>x.id===local.remoteId||(x.requestId||x.clientRequestId)===local.requestId);
       if(remote){Object.assign(local,{remoteId:remote.id,stage:remote.stage,running:remote.running,awaitingApproval:remote.awaitingApproval,events:remote.events||[]});if(!local.running)this.locks.delete(profile.id);else this.locks.set(profile.id,local.id);}}this.save();}
     catch{for(const row of current)row.workerUnavailable=true;}
@@ -45,6 +48,8 @@ export class Jobs extends EventEmitter{
       this.rows.push(row);this.save();
       let remoteSubmitted=false;
       try{
+        if(this.locks.has(walletId))throw Error('该钱包上一笔订单仍在执行');
+        await this.expired.check(this.rows,Date.now(),true);
         if(this.locks.has(walletId))throw Error('该钱包上一笔订单仍在执行');
         const unresolved=this.rows.find(r=>r.id!==row.id&&r.walletId===walletId&&['receipt_unresolved','interrupted_check_chain','submission_unknown'].includes(r.stage));
         if(unresolved)throw Error('该钱包有待核对订单，请先核对交易记录');
@@ -76,11 +81,15 @@ export class Jobs extends EventEmitter{
     const baseline=join(DATA,'protocol-baseline.json');
     if(!existsSync(baseline))copyFileSync(join(engine,'abi','protocol-baseline.json'),baseline);
     const env={...this.environment(),AGENT_WALLET_ADDRESS:address,AGENT_MAX_BUY_BNB:settings.maxBuyBNB,
+      AGENT_PREFLIGHT_SNAPSHOT:JSON.stringify(this.pool.facts?.get(row.walletId)||null),
       AGENT_WORKFLOW_CONSENT:JSON.stringify(row.workflowConsent),
       AGENT_GAS_RESERVE_BNB:settings.gasReserveBNB,AGENT_SLIPPAGE_BPS:String(settings.slippageBps),
       OPENFOUR_BASELINE_STATE:baseline,OPENFOUR_MANUAL_STATE_DIR:join(walletData,'four-orders'),AGENT_TRADE_STATE_DIR:join(walletData,'orders')};
     let script,args;
-    if(info.platform==='four'&&info.phase==='curve'){
+    if(['claim','transfer'].includes(order.action)){
+      script='agent_ui/position_operation.mjs';args=[`--token=${order.token}`,`--wallet=${address}`,`--action=${order.action}`,`--intent=${row.id}`,
+        ...(order.action==='transfer'?[`--recipient=${order.recipient}`]:[])];
+    }else if(info.platform==='four'&&info.phase==='curve'){
       script=order.action==='buy'?'buy_agent_id_ca.mjs':'sell_agent_id_ca.mjs';
       args=[order.token,'--execute','--manual-confirm',...(order.action==='buy'?[
         `--budget-bnb=${order.budgetBNB}`,`--intent=${row.id}`,...(order.mode==='percent'?[`--percent-bps=${order.bps}`]:[])]:[
@@ -105,6 +114,21 @@ export class Jobs extends EventEmitter{
     if(row.remoteId){await this.pool.request(this.pool.get(row.walletId),'/worker/approve',{jobId:row.remoteId});return;}
     const child=this.children.get(id);if(!child||!row.running)throw Error('订单已结束');
     row.awaitingApproval=false;row.stage='approval_sent';child.stdin.write('APPROVE\n');this.save();
+  }
+  async operation(input){if(process.env.AGENT_PRIVATE_OPERATIONS!=='1')throw Error('private_operations_disabled');
+    if(!['claim','transfer'].includes(input.action)||!/^[0-9a-f-]{36}$/i.test(input.requestId||''))throw Error('invalid_position_operation');
+    const token=getAddress(input.token),recipient=input.action==='transfer'?getAddress(input.recipient):null;
+    if(recipient===ZeroAddress||recipient===token)throw Error('invalid_transfer_recipient');
+    const prior=this.rows.find(r=>r.walletId==='primary'&&r.requestId===input.requestId);if(prior)return {jobs:[prior]};
+    if(this.locks.has('primary'))throw Error('wallet_job_running');
+    const id=randomUUID();this.locks.set('primary',id);
+    try{const status=await this.pool.status('primary');if(!status.ready)throw Error(status.error||'wallet_not_ready');
+      const info=await this.detect(this.provider,token,coreAbi,status.address);
+      if(input.action==='transfer'&&(info.phase!=='graduated'||!info.pair))throw Error('transfer_requires_verified_external_market');
+      const row={id,requestId:input.requestId,walletId:'primary',walletLabel:'钱包',walletAddress:status.address,token,
+        action:input.action,platform:info.platform,phase:info.phase,createdUtc:new Date().toISOString(),running:true,stage:'preparing',events:[]};
+      this.rows.push(row);this.save();this.run(row,info,{action:input.action,token,recipient},status.address);return {jobs:[row]};
+    }catch(e){this.locks.delete('primary');throw e;}
   }
   statistics(){const rows=this.rows.filter(r=>r.events?.length);return {total:rows.length,
     confirmed:rows.filter(r=>r.stage==='confirmed').length,failed:rows.filter(r=>r.stage==='error').length,

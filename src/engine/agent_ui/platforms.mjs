@@ -80,10 +80,13 @@ export const IFACE = Object.freeze({
   flapStandard: new Interface(FLAP_STANDARD),
 });
 const isSame = (a, b) => getAddress(a) === getAddress(b);
+const factoryPromises=new WeakMap();
+function routerFactory(provider){let pending=factoryPromises.get(provider);if(!pending){pending=new Contract(ROUTER,PCS_ROUTER,provider).factory()
+  .catch(e=>{factoryPromises.delete(provider);throw e;});factoryPromises.set(provider,pending);}return pending;}
 
 export async function verifiedPair(provider, token, quote) {
   const router = new Contract(ROUTER, PCS_ROUTER, provider);
-  const factoryAddress = await router.factory();
+  const factoryAddress = await routerFactory(provider);
   const factory = new Contract(factoryAddress, PCS_FACTORY, provider);
   const address = await factory.getPair(token, quote);
   if (isSame(address, ZeroAddress)) return null;
@@ -126,7 +129,7 @@ async function detectFour(provider, token, fourAbi) {
   return result;
 }
 
-async function detectFlap(provider, address, wallet = WALLET) {
+async function detectFlap(provider, address, wallet=WALLET) {
   const factory = new Contract(FLAP.factory, FLAP_FACTORY, provider);
   let market = await factory.marketOfToken(address).catch(() => ZeroAddress);
   if (isSame(market, ZeroAddress) && await factory.isMarket(address).catch(() => false)) market = address;
@@ -170,7 +173,7 @@ async function detectFlap(provider, address, wallet = WALLET) {
   return result;
 }
 
-async function detectGang(provider, token, wallet = WALLET) {
+async function detectGang(provider, token, wallet=WALLET) {
   for (const pad of GANG_PADS) {
     const contract = new Contract(pad.address, pad.kind === 'soft' ? GANG_SOFT : GANG_V2, provider);
     let curve;
@@ -195,10 +198,10 @@ async function detectGang(provider, token, wallet = WALLET) {
   return null;
 }
 
-export async function detectAgentToken(provider, raw, fourAbi, wallet = WALLET) {
+export async function detectAgentToken(provider, raw, fourAbi,wallet=WALLET) {
   const token = getAddress(raw);
   for (const detect of [() => detectFour(provider, token, fourAbi),
-    () => detectFlap(provider, token, wallet), () => detectGang(provider, token, wallet)]) {
+    () => detectFlap(provider, token,wallet), () => detectGang(provider, token,wallet)]) {
     const found = await detect();
     if (found) return found;
   }

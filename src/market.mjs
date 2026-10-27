@@ -203,7 +203,8 @@ export class MarketData {
     this.lastGangBlock = head;
   }
 
-  async detail(info) {
+  async detail(info,interval='1m') {
+    const bucketMs={'1m':60000,'5m':300000,'15m':900000,'1h':3600000}[interval];if(!bucketMs)throw Error('invalid_chart_interval');
     const quoteDecimals=!info.quote||/^0x0+$/.test(info.quote)?18:
       Number(await new Contract(info.quote,['function decimals() view returns(uint8)'],this.provider).decimals());
     const token = getAddress(info.token);
@@ -250,20 +251,21 @@ export class MarketData {
       source = 'Flap 成交索引';
     }
     trades = trades.filter(x => x.ts && x.price > 0).slice(-200);
-    let candles = candlesFromTrades(trades);
+    let candles = candlesFromTrades(trades,bucketMs);
     chartSource = source;
     if (info.phase === 'graduated' && info.pair) {
       try {
-        const data = await json(`https://api.geckoterminal.com/api/v2/networks/bsc/pools/${info.pair}/ohlcv/minute?aggregate=1&limit=180&currency=usd&token=${token}`);
+        const frame=interval==='1h'?'hour':'minute',aggregate=interval==='1h'?1:bucketMs/60000;
+        const data = await json(`https://api.geckoterminal.com/api/v2/networks/bsc/pools/${info.pair}/ohlcv/${frame}?aggregate=${aggregate}&limit=180&currency=usd&token=${token}`);
         const rows = data?.data?.attributes?.ohlcv_list || [];
         if (rows.length) {
           candles = rows.map(x => ({ time: ms(x[0]), open: num(x[1]), high: num(x[2]),
             low: num(x[3]), close: num(x[4]), volume: num(x[5]) })).sort((a, b) => a.time - b.time);
-          chartSource = 'GeckoTerminal 外盘池 USD 1 分钟 K 线';
+          chartSource = `GeckoTerminal 外盘池 USD ${interval==='1h'?'1 小时':parseInt(interval)+' 分钟'} K 线`;
         }
       } catch { /* Keep the available venue trades, with their original source label. */ }
     }
-    return { token, platform: info.platform, phase: info.phase, quote: quoteLabel(info.quote),
+    return { token, platform: info.platform, phase: info.phase, quote: quoteLabel(info.quote),interval,summary:this.rows.get(key(token))||null,
       source, chartSource, updatedAt: Date.now(), candles, trades: trades.slice(-60).reverse() };
   }
 }

@@ -7,6 +7,7 @@ import { preflight } from './buy_agent_id_ca.mjs';
 import { baw, previewDiagnostics, submitContractCall } from './wallet_cli.mjs';
 import { waitForBrowserApproval } from './agent_ui/approval_gate.mjs';
 import {prepareSaleSettlement,recordSaleReceipt,recordNativeReceipt,settleSaleToBNB} from './agent_ui/sale_settlement.mjs';
+import {reconcileRecordedCall,expiredCallMayRetry} from './agent_ui/recovery.mjs';
 
 const CORE = getAddress('0xebe7b6C1089D9F72aD07f34E36d898e44E5e27f3');
 const WALLET = getAddress(process.env.AGENT_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000');
@@ -126,7 +127,7 @@ async function submit(provider, token, path, operation, to, inputData, head, sta
     for(const end=Date.now()+300000;Date.now()<end;){
       try{state=await reconcile(provider,token,path);}catch{out({stage:'reconciliation_waiting'});}
       if(state.stage.endsWith('_confirmed')||['confirmed','reverted'].includes(state.stage))break;
-      await new Promise(r=>setTimeout(r,state.txHash?700:2000));
+      await new Promise(r=>setTimeout(r,state.txHash?(Date.now()-state.startedMs<5000?150:500):2000));
     }
     out({stage:state.stage,token,txHash:state.txHash,orderId:state.orderId});
     return state;
@@ -147,9 +148,12 @@ async function main() {
       txHash: previous?.txHash ?? null, orderId: previous?.orderId ?? null,
       tokenSold: previous?.tokenSold ? formatEther(previous.tokenSold) : null,
       quoteReceived: previous?.quoteReceived ? formatEther(previous.quoteReceived) : null });
-    if (previous && !['confirmed', 'reverted', 'approval_confirmed'].includes(previous.stage))
-      throw new Error('previous_order_unresolved');
-    if (previous?.stage === 'reverted') throw new Error('previous_order_reverted_review_first');
+    if(previous&&!['confirmed','reverted','approval_confirmed','confirmation_expired_unbroadcast'].includes(previous.stage)){
+      const resolved=await reconcileRecordedCall(provider,previous,WALLET,baw);
+      if(resolved.kind==='confirmation_closed'&&expiredCallMayRetry(previous)){previous=save(path,{...previous,stage:'confirmation_expired_unbroadcast',reconciliation:resolved});out({stage:'prior_confirmation_closed',orderId:previous.orderId});}
+      else if(resolved.kind==='reverted')previous=save(path,{...previous,stage:'reverted',txHash:resolved.txHash});
+      else throw Error('previous_order_unresolved');
+    }
     const runtime = await preflight(provider, token);
     const { head, toolsAddress, options, beforeToken, bnbBalance } = runtime;
     if (beforeToken <= 0n) throw new Error('no_token_balance_to_sell');

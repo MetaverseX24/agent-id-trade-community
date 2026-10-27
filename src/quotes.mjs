@@ -2,6 +2,7 @@ import { Contract, ZeroAddress, formatEther, formatUnits, parseEther, getAddress
 import { ABI, FLAP, WBNB, ROUTER } from './engine/agent_ui/platforms.mjs';
 import { quotePaths, bestPathQuote } from './engine/agent_ui/quote_paths.mjs';
 import { resolveBuyQuote } from './engine/agent_ui/quote_search.mjs';
+import {resolveGangBuyQuote} from './engine/agent_ui/gang_curve.mjs';
 import { REGISTRY, toolsAbi } from './protocol_snapshot.mjs';
 const VT=1066666666666666666666666667n,ceil=(a,b)=>(a+b-1n)/b;
 export function gangBuy(c,gross,room){const reserve=VT-c.sold;if(reserve<=0n)return 0n;
@@ -32,7 +33,7 @@ export async function createQuote(provider,info,order){
       else{input=quantity;expected=(await pad.quoteSell(info.token,quantity))[0];}
     }else{const [c,room]=await Promise.all([pad.curves(info.token),pad.walletRoom(info.token,address)]);
       if(buy){let upper=native;if(quote!==WBNB)upper=(await bestPathQuote(provider,await quotePaths(provider,quote),native*98n/100n)).amount;
-        const result=await resolveBuyQuote(upper,quantity,async x=>gangBuy(c,x,room),order.mode!=='bnb');input=result.gross;expected=result.output;}
+        const result=resolveGangBuyQuote(c,upper,quantity,room,order.mode!=='bnb');input=result.gross;expected=result.output;}
       else{input=quantity;expected=gangSell(c,quantity);}}
   }else if(info.platform==='flap'&&info.phase==='curve'){
     const market=new Contract(info.market,ABI.FLAP_MARKET,provider),portal=new Contract(FLAP.portal,ABI.FLAP_PORTAL,provider);
