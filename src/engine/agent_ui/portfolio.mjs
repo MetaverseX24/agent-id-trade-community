@@ -3,6 +3,7 @@ import {dirname} from 'node:path';
 import {Contract,Interface,ZeroAddress,formatUnits,getAddress} from 'ethers';
 import {ABI,WBNB,BNB,FOUR_CORE,FLAP} from './platforms.mjs';
 import {netReceived} from './sale_settlement.mjs';
+import {GANG,GANG_ROUTER_IFACE} from './gang_protocol.mjs';
 const same=(a,b)=>String(a||'').toLowerCase()===String(b||'').toLowerCase();
 const norm=a=>!a||same(a,ZeroAddress)||same(a,BNB)||same(a,WBNB)?WBNB:getAddress(a);
 const four=new Interface(['event TradeExecuted(address indexed token,address indexed trader,uint256 indexed presetId,bool isBuy,address quoteAsset,address vault,uint256 requestedTokenAmount,uint256 tokenAmount,uint256 curveQuoteAmount,uint256 traderQuoteAmount,uint256 lastPrice,uint256 slippageLimit,uint256 protocolFee,uint256 taxFee,uint256 devFee,uint256 antiSniperFee,uint256 totalRaised,uint256 remainingForSale)']);
@@ -65,6 +66,17 @@ export class Portfolio {
         else{
           const quoteDelta=netReceived(receipt,quoteAsset,wallet);money=j.action==='buy'?-quoteDelta:quoteDelta;
           if(quantity===0n&&fill?.quantityRaw){quantity=BigInt(fill.quantityRaw)*(j.action==='buy'?1n:-1n);unit=fill.unit;}
+          if(same(tx.to,GANG.router)){
+            let g;try{g=GANG_ROUTER_IFACE.parseTransaction({data:tx.data,value:tx.value});}catch{}
+            if(g&&same(g.args[0],j.token)){
+              if(j.action==='buy'&&['v3BuyBNB','fairMintBNB','poolBuyBNB'].includes(g.name)){
+                quoteAsset=WBNB;money=tx.value-(quoteDelta>0n?quoteDelta:0n);quality='verified';
+              }else if(j.action==='sell'&&g.name==='poolSellForBNB'){
+                quoteAsset=WBNB;money=0n;
+                for(const l of receipt.logs)if(same(l.address,WBNB))try{const a=withdraw.parseLog(l)?.args;if(a&&same(a.src,GANG.router))money+=a.wad;}catch{}
+              }
+            }
+          }
           if(money<=0n&&same(quoteAsset,WBNB)){
             let decoded;try{decoded=router.parseTransaction({data:tx.data,value:tx.value});}catch{}
             if(j.action==='buy'&&tx.value>0n){money=tx.value;quality=decoded?.name==='swapExactETHForTokensSupportingFeeOnTransferTokens'?'verified':'estimated';}

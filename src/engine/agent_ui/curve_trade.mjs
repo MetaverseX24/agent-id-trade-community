@@ -13,6 +13,7 @@ import { canRetryAfterApproval,reconcileRecordedCall,expiredCallMayRetry } from 
 import {gangV2BuyQuote,gangV2SellQuote,resolveGangBuyQuote} from './gang_curve.mjs';
 import {walletSnapshot} from './preflight_snapshot.mjs';
 import {prepareFundedBuy} from './funded_buy.mjs';
+import {tradeModernGang} from './gang_trade.mjs';
 import { ABI, BNB, FLAP, FOUR_CORE, GANG_PADS, IFACE, ROUTER, WALLET, WBNB,
   detectAgentToken, verifiedPair } from './platforms.mjs';
 
@@ -274,7 +275,7 @@ async function sellFlap(provider,info,plan,path,state) {
 }
 async function buyGang(provider,info,plan,path,state) {
   const pad=GANG_PADS.find(x=>x.id===info.pad);
-  const launchpad=new Contract(pad.address,pad.kind==='soft'?ABI.GANG_SOFT:ABI.GANG_V2,provider);
+  const launchpad=new Contract(pad.address,pad.kind==='soft'?ABI.GANG_SOFT:pad.id==='s'?ABI.GANG_S:ABI.GANG_V2,provider);
   const native=await budgetAfterReserve(provider,plan.budget);
   const erc=new Contract(info.token,ABI.ERC20,provider);
   const [held,supply]=await Promise.all([erc.balanceOf(WALLET),erc.totalSupply()]);
@@ -314,7 +315,7 @@ async function sellGang(provider,info,plan,path,state) {
   const amount=balance*plan.sellBps/10000n;
   if (amount<=0n) throw new Error('no_gang_tokens_to_sell');
   const pad=GANG_PADS.find(x=>x.id===info.pad);
-  const launchpad=new Contract(pad.address,pad.kind==='soft'?ABI.GANG_SOFT:ABI.GANG_V2,provider);
+  const launchpad=new Contract(pad.address,pad.kind==='soft'?ABI.GANG_SOFT:pad.id==='s'?ABI.GANG_S:ABI.GANG_V2,provider);
   const expected=pad.kind==='soft' ? (await launchpad.quoteSell(info.token,amount))[0] :
     gangV2SellQuote(await launchpad.curves(info.token),amount);
   output({stage:'quote',platform:'gang',tokensToSell:formatEther(amount),
@@ -467,7 +468,15 @@ async function main() {
     const state={version:1,intent:plan.intent,token:info.token,platform:info.platform,unit:info.unit||'token',market:info.market||null,
       action:plan.action,stage:'preflight',createdUtc:new Date().toISOString()};
     let ok;
-    if (info.platform==='flap' && info.phase==='standard_curve')
+    if(info.platform==='gang'&&['v3','fair'].includes(info.kind))
+      ok=await tradeModernGang({provider,info,plan,state,wallet:WALLET,abi:ABI,wbnb:WBNB,pancake:ROUTER,minOut,emit:output,
+        submit:(label,to,value,data)=>submit(provider,path,state,label,to,value,data),
+        allowance:(asset,spender,amount)=>ensureAllowance(provider,path,state,asset,spender,amount),
+        funded:(gross,spender,refresh)=>fundedBuy(provider,path,state,info,plan,gross,spender,refresh),
+        nativeBudget:()=>budgetAfterReserve(provider,plan.budget),
+        capacity:(native,existing)=>quoteCapacity(provider,info.quote,plan.budget,native,existing),
+        prepareSettlement:native=>prepareSaleSettlement(provider,info,WALLET,native)});
+    else if (info.platform==='flap' && info.phase==='standard_curve')
       ok=await tradeStandardFlap(provider,info,plan,path,state);
     else if (info.phase==='graduated') ok=await tradeDex(provider,info,plan,path,state);
     else if (info.platform==='flap') ok=plan.action==='buy' ?

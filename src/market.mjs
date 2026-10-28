@@ -166,11 +166,16 @@ export class MarketData {
   async pullGang() {
     let apiError;
     try {
-      const v2 = await json(`${GANG_BASE}/stocks/tokens?limit=100&offset=0`);
-      for (const x of v2.items || []) {
+      const results=await Promise.allSettled([
+        json(`${GANG_BASE}/stocks/tokens?limit=100&offset=0`),
+        json(`${GANG_BASE}/v3/tokens?status=all&limit=100`),
+        json(`${GANG_BASE}/fair/sales?status=all&limit=100`)]);
+      const successful=results.filter(x=>x.status==='fulfilled');
+      if(!successful.length)throw Error('gang_lists_unavailable');
+      for (const x of successful.flatMap(x=>x.value.items||[])) {
         this.upsert({ token: x.address, platform: 'gang', name: String(x.name || '').slice(0, 64),
           symbol: String(x.symbol || '').slice(0, 24), quote: x.quoteSymbol || 'BNB',
-          quoteAddress: x.quoteAddress || WBNB, phase: x.graduated ? 'graduated' : 'curve',
+          quoteAddress: x.quoteAddress || WBNB, phase: x.graduated||x.status==='launched' ? 'graduated' : 'curve',kind:x.track||'v2',
           progress: num(x.progressPct), marketCapUsd: num(x.fdvUsd),
           createdAt: ms(x.createdAt), source: 'Gang.fun 公开列表' });
       }
@@ -233,8 +238,9 @@ export class MarketData {
       }
       source = `Four.meme 链上成交，最近 ${head - from + 1} 个区块`;
     } else if (info.platform === 'gang') {
-      const segment = info.kind === 'soft' ? '' : '/stocks';
-      const data = await json(`${GANG_BASE}${segment}/tokens/${token}/trades?limit=200&offset=0&sort=ts_desc`);
+      const segment = info.kind === 'soft' ? '' : info.kind==='v3'?'/v3':info.kind==='fair'?'/fair':'/stocks';
+      const resource=info.kind==='fair'?'sales':'tokens';
+      const data = await json(`${GANG_BASE}${segment}/${resource}/${token}/trades?limit=200&offset=0&sort=ts_desc`);
       trades = (data.items || []).map(x => ({ ts: ms(x.ts), side: x.side,
         tokens: num(x.tokens), quoteAmount: num(x.quoteIn ?? x.bnb ?? x.quoteOut),
         price: num(x.price), trader: x.trader, tx: x.tx })).sort((a, b) => a.ts - b.ts);

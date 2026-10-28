@@ -11,6 +11,8 @@ description: 在自托管 Agent ID Community 终端按用户明确参数买卖 B
 
 由队列从链上识别平台、阶段和真实池。Four 核对 Agent ID 模板；Flap 区分份额内盘、已发行曲线和外盘，发行后先领取；Gang 核对具体 Launchpad、底池币及精度。名称、后缀不能代替登记证明。
 
+Gang 2026-10-28：新币从 GangPadRegistry.lookup 与 GangLaunchpad.kindOf 分清 V3 曲线和公平打新，旧币继续匹配旧 pad，不把新币交给旧 V2 ABI。已适配的 BNB 曲线用 v3BuyBNB，打新用 fairMintBNB；非 BNB 底池仍连续换币、限额授权。公平打新 1% 是 200 整份，实际 cap 可能更低，不能擅自降目标；未发射的卖出是 withdraw 而非 DEX swap。外盘核实真实池后经 GangRouter 卖出为 BNB，含税币报价使用 previewSellNextBlock。曲线退款可能是 WBNB，只按本单回执解包；注册表新增的未审查 pad 不自动授权。[适配记录](../docs/gang-20261028.md)。
+
 每次意图使用随机 UUID requestId，同一次操作查询和重试沿用原编号。订单参数示例仅供格式参考，不是授权：
 
 ```json

@@ -102,6 +102,7 @@ export async function settleSaleToBNB({provider,wallet,state,slippageBps,submit,
 
 export function recordBuyFundingReceipt(state,receipt,wallet){const f=state.quoteFunding;if(!f)return;
   f.buyTxHash=receipt.hash||receipt.transactionHash;
+  if(f.nativeDirect){const refund=netReceived(receipt,f.asset,wallet);f.acquiredRaw=String(refund>0n?refund:0n);f.spentRaw='0';return;}
   const spent=-netReceived(receipt,f.asset,wallet);f.spentRaw=(spent>0n?spent:0n).toString();
 }
 export function unusedAcquiredQuote(f){const unused=BigInt(f.acquiredRaw||0)-BigInt(f.spentRaw||0);return unused>0n?unused:0n;}

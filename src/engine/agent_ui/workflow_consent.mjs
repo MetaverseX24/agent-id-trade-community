@@ -1,13 +1,15 @@
 import { getAddress, parseEther,Interface,ZeroAddress } from 'ethers';
 import { FOUR_CORE, FLAP, GANG_PADS, ROUTER, WBNB } from './platforms.mjs';
 import { previewRiskState } from '../preview_policy.mjs';
+import {GANG,checkGangTradeCall} from './gang_protocol.mjs';
 
 const same=(a,b)=>String(a).toLowerCase()===String(b).toLowerCase();
 export function makeWorkflowConsent(info,order,wallet,id){
   const protocol=info.platform==='four'?[FOUR_CORE]:info.platform==='flap'?[FLAP.portal,FLAP.standardPortal,...(info.market?[info.market]:[])]:
-    [GANG_PADS.find(x=>x.id===info.pad)?.address].filter(Boolean);
+    (info.pad==='gang'?[GANG.pad,GANG.router]:[GANG_PADS.find(x=>x.id===info.pad)?.address]).filter(Boolean);
+  const gang=info.pad==='gang'?{gangKind:info.kind,gangPhase:info.phase}:{};
   const assets=[info.token,info.quote,WBNB].filter(x=>x&& !/^0x0+$/.test(x));
-  return {id,chainId:56,wallet:getAddress(wallet),token:info.token,action:order.action,
+  return {id,chainId:56,...gang,wallet:getAddress(wallet),token:info.token,action:order.action,
     quoteAsset:!info.quote||same(info.quote,ZeroAddress)||same(info.quote,'0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE')?WBNB:info.quote,
     maxNativeWei:order.action==='buy'?parseEther(order.budgetBNB||'0.3').toString():'0',
     targets:[...new Set([...assets,...protocol,ROUTER])],spenders:[...protocol,ROUTER],assets};
@@ -21,6 +23,7 @@ export function checkWorkflowStep(preview,context,consent,spent=0n){
   if(!['buy','sell','approve','approval','wrap','get_quote','claim','unwrap','sell_quote'].includes(context.step))throw Error('workflow_step_not_authorized');
   if(['buy','sell'].includes(context.step)&&context.step!==consent.action)throw Error('workflow_action_mismatch');
   if(['buy','sell'].includes(context.step)&&!consent.spenders.some(x=>same(x,context.to)))throw Error('workflow_trade_target_mismatch');
+  checkGangTradeCall(context,consent);
   const value=BigInt(context.valueWei||0),cap=BigInt(consent.maxNativeWei);
   if(value<0n||spent+value>cap)throw Error('workflow_native_budget_exceeded');
   if(['approve','approval'].includes(context.step)){

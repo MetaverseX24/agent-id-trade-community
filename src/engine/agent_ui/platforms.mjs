@@ -1,5 +1,6 @@
 import { Contract, Interface, ZeroAddress, getAddress } from 'ethers';
 import { migratedPair } from '../external_market.mjs';
+import {detectModernGang} from './gang_protocol.mjs';
 
 export const WALLET = getAddress(process.env.AGENT_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000');
 export const WBNB = getAddress('0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c');
@@ -30,6 +31,7 @@ const GANG_V2 = [
   'function walletRoom(address,address) view returns (uint256)',
   'function buy(address,uint256,uint256)', 'function sell(address,uint256,uint256)',
 ];
+const GANG_S=GANG_V2.map(x=>x.startsWith('function curves(')?x.replace(',bool taxed',''):x);
 const GANG_SOFT = [
   'function curves(address) view returns (address creator,uint256 realBnb,uint256 sold,bool graduated,address pair)',
   'function walletRoom(address,address) view returns (uint256)',
@@ -72,7 +74,7 @@ const PCS_PAIR = [
   'function factory() view returns (address)', 'function token0() view returns (address)',
   'function token1() view returns (address)', 'function getReserves() view returns (uint112,uint112,uint32)',
 ];
-export const ABI = Object.freeze({ ERC20, GANG_V2, GANG_SOFT, FLAP_PORTAL, FLAP_MARKET, FLAP_STANDARD, PCS_ROUTER });
+export const ABI = Object.freeze({ ERC20, GANG_V2, GANG_SOFT, GANG_S, FLAP_PORTAL, FLAP_MARKET, FLAP_STANDARD, PCS_ROUTER });
 export const IFACE = Object.freeze({
   erc20: new Interface(ERC20),
   gangV2: new Interface(GANG_V2), gangSoft: new Interface(GANG_SOFT),
@@ -174,8 +176,10 @@ async function detectFlap(provider, address, wallet=WALLET) {
 }
 
 async function detectGang(provider, token, wallet=WALLET) {
+  const modern=await detectModernGang(provider,token,wallet,{ercAbi:ERC20,wbnb:WBNB,verifiedPair});
+  if(modern)return modern;
   for (const pad of GANG_PADS) {
-    const contract = new Contract(pad.address, pad.kind === 'soft' ? GANG_SOFT : GANG_V2, provider);
+    const contract = new Contract(pad.address, pad.kind === 'soft' ? GANG_SOFT : pad.id==='s'?GANG_S:GANG_V2, provider);
     let curve;
     try { curve = await contract.curves(token); } catch { continue; }
     if (isSame(curve.creator, ZeroAddress)) continue;

@@ -82,7 +82,47 @@
       "implementationHash": null,
       "beacon": "0x0000000000000000000000000000000000000000",
       "admin": "0x0000000000000000000000000000000000000000"
+    },
+    "0x15cfd2dc8278fb87a1783ef42111618e20874365": {
+      "codeHash": "0xe052484fe5a9b1da61131388848051aa84d33b971dc2db689a56be08c1d594f0",
+      "implementation": "0x0000000000000000000000000000000000000000",
+      "implementationHash": null,
+      "admin": "0x0000000000000000000000000000000000000000",
+      "beacon": "0x0000000000000000000000000000000000000000",
+      "reviewScope": "2026-10-28 official deployment, two-RPC runtime, proxy authorities, ABI, router/origin and reentrancy review; not a full security audit.",
+      "reviewedOwner": "0x2866369F7acEFC9760bdE7779362fae5cD68B41E"
+    },
+    "0xe040445690aa56c8b68b7f7038c7b2562b5079c4": {
+      "codeHash": "0xc62bec9f3d75e3bcef245a93bb37bc2efeeea8a0ca1c31dcc506f0d21ac9246e",
+      "implementation": "0x385bab8c3040c6b41251897AC1D6622e61601c58",
+      "implementationHash": "0x1fe7a1f346a949e59478c956b27358b01bfbbf6c374bb0f09d782d919d946074",
+      "admin": "0xddeAB7A254e42D96D5863dAeF4E89BD426017bDa",
+      "beacon": "0x0000000000000000000000000000000000000000",
+      "reviewedAdminOwner": "0x3911996E2F6c5636d6b1b32f75cf94d0aF4604C5",
+      "adminCodeHash": "0x569f069a178306c2691fcb0da76132350602a9bf529a23dc2f13dbedb0c9df7c",
+      "reviewScope": "2026-10-28 official deployment, two-RPC runtime, proxy authorities, ABI, router/origin and reentrancy review; not a full security audit."
+    },
+    "0x4ff77d4d9ac080939a24e1b805206ba094c44e5c": {
+      "codeHash": "0x492edad2b78aa3b13e31dda9764eee37eaa08c9b3ebcbc0ef62ee6480ae3d282",
+      "implementation": "0x84DA18f55493032eDdB99c85726bD25f182080b5",
+      "implementationHash": "0x9718bfb891ac811161ff6efc3e11ea2849d5f059a961d9e210f8c927bc8a51cc",
+      "admin": "0x9efbcf84b80Ab437AE82c74E2D047b997172f84D",
+      "beacon": "0x0000000000000000000000000000000000000000",
+      "reviewedAdminOwner": "0x2866369F7acEFC9760bdE7779362fae5cD68B41E",
+      "adminCodeHash": "0x39e8ba15a5d2f4d3c3f5bb8a4ee12635cf09a9c189cb2694a77671c7874abdfb",
+      "reviewScope": "2026-10-28 official deployment, two-RPC runtime, proxy authorities, ABI, router/origin and reentrancy review; not a full security audit.",
+      "reviewedOwner": "0x2866369F7acEFC9760bdE7779362fae5cD68B41E"
+    },
+    "0x6d8d3de459629cbb7b552169a55d754db60cae0c": {
+      "codeHash": "0x08d8e693324a197cfbc502fbec3c3c76e44782893fdcf8df511fc5596bef7c1d",
+      "implementation": "0x0000000000000000000000000000000000000000",
+      "implementationHash": null,
+      "admin": "0x0000000000000000000000000000000000000000",
+      "beacon": "0x0000000000000000000000000000000000000000",
+      "reviewScope": "2026-10-28 official deployment, two-RPC runtime, proxy authorities, ABI, router/origin and reentrancy review; not a full security audit.",
+      "reviewedOwner": "0x2866369F7acEFC9760bdE7779362fae5cD68B41E"
     }
   },
-  "lastReviewedUtc": "2026-10-27T10:11:49.764266+00:00"
+  "lastReviewedUtc": "2026-10-27T10:11:49.764266+00:00",
+  "gangReviewedUtc": "2026-10-28"
 }

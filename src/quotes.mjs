@@ -3,6 +3,7 @@ import { ABI, FLAP, WBNB, ROUTER } from './engine/agent_ui/platforms.mjs';
 import { quotePaths, bestPathQuote } from './engine/agent_ui/quote_paths.mjs';
 import { resolveBuyQuote } from './engine/agent_ui/quote_search.mjs';
 import {resolveGangBuyQuote} from './engine/agent_ui/gang_curve.mjs';
+import {GANG,GANG_ABI,GANG_REGISTRY_ABI,GANG_SHARE,fairBuyPlan,gangPoolQuote} from './engine/agent_ui/gang_protocol.mjs';
 import { REGISTRY, toolsAbi } from './protocol_snapshot.mjs';
 const VT=1066666666666666666666666667n,ceil=(a,b)=>(a+b-1n)/b;
 export function gangBuy(c,gross,room){const reserve=VT-c.sold;if(reserve<=0n)return 0n;
@@ -26,8 +27,28 @@ export async function createQuote(provider,info,order){
       await tools.estimateBuy.staticCall(info.token,address,quantity,options,'0x')):
       await tools.estimateSell.staticCall(info.token,address,quantity,options,'0x');
     if(buy){input=estimate.userPays;expected=estimate.tokenAmount;}else{input=quantity;expected=estimate.userReceives;}quote=WBNB;
+  }else if(info.platform==='gang'&&['v3','fair'].includes(info.kind)&&info.phase==='curve'){
+    const pad=new Contract(GANG.pad,GANG_ABI,provider);
+    if(info.kind==='fair'){
+      const [sale,shares]=await Promise.all([pad.sales(info.token),pad.positions(info.token,address)]);
+      if(buy){let upper=native;if(quote!==WBNB)upper=(await bestPathQuote(provider,await quotePaths(provider,quote),native*98n/100n)).amount;
+        const result=fairBuyPlan(sale,shares,held,supply,order.mode==='bnb'?null:bps,upper);
+        input=result.gross;expected=result.output;
+      }else{const n=shares*bps/10000n;input=n*GANG_SHARE;expected=(await pad.previewWithdraw(info.token,address,n))[0];}
+    }else{
+      const [c,room]=await Promise.all([pad.curves(info.token),pad.walletRoom(info.token,address)]);
+      if(buy){let upper=native;if(quote!==WBNB)upper=(await bestPathQuote(provider,await quotePaths(provider,quote),native*98n/100n)).amount;
+        const result=resolveGangBuyQuote(c,upper,quantity,room,order.mode!=='bnb');input=result.gross;expected=result.output;
+      }else{input=quantity;expected=(await new Contract(GANG.registry,GANG_REGISTRY_ABI,provider).previewSell(info.token,address,quantity))[0];}
+    }
+  }else if(info.platform==='gang'&&['v3','fair'].includes(info.kind)&&info.pair){
+    if(buy){const path=quote===WBNB?[WBNB,info.token]:[WBNB,quote,info.token];
+      const tax=BigInt(info.buyTaxBps||0),gross=(quantity*10000n+9999n-tax)/(10000n-tax);
+      input=order.mode==='bnb'?native:(await new Contract(ROUTER,ABI.PCS_ROUTER,provider).getAmountsIn(gross,path))[0];
+      expected=await gangPoolQuote(provider,info,input,'buy',{routerAbi:ABI.PCS_ROUTER,pancake:ROUTER,wbnb:WBNB});
+    }else{input=quantity;expected=await gangPoolQuote(provider,info,input,'sell',{routerAbi:ABI.PCS_ROUTER,pancake:ROUTER,wbnb:WBNB});}quote=WBNB;
   }else if(info.platform==='gang'&&info.phase==='curve'){
-    const pad=new Contract(info.venue,info.kind==='soft'?ABI.GANG_SOFT:ABI.GANG_V2,provider);
+    const pad=new Contract(info.venue,info.kind==='soft'?ABI.GANG_SOFT:info.pad==='s'?ABI.GANG_S:ABI.GANG_V2,provider);
     if(info.kind==='soft'){
       if(buy){const result=await resolveBuyQuote(native,quantity,async x=>(await pad.quoteBuy(info.token,address,x))[0],order.mode!=='bnb');input=result.gross;expected=result.output;}
       else{input=quantity;expected=(await pad.quoteSell(info.token,quantity))[0];}

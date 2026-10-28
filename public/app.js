@@ -9,7 +9,9 @@ const price=n=>Number(n)>0?Number(n).toPrecision(5):'—';
 const phase=p=>({curve:'内盘',standard_curve:'发行后曲线',graduated:'外盘',launching:'发行中'})[p]||p;
 function element(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
 function notice(text){$('notice').textContent=text;}
-function humanError(raw){return {wallet_job_running:'这个钱包正在处理上一笔交易，请查看下方进度',wallet_previous_order_needs_reconciliation:'上一笔结果还在核对，请勿重复下单',
+function humanError(raw){return {gang_fair_target_exceeds_cap_or_remaining:'目标比例超过该打新的钱包上限或剩余份额，请选择更小比例',gang_fair_target_requires_whole_shares:'打新只能买整份，请按该币每份数量调整比例',
+    gang_fair_sell_below_one_share:'所选比例不足一整份，请提高卖出比例',gang_fair_budget_below_one_share:'预算不足购买一整份',gang_pad_update_requires_review:'平台新增了尚未适配的合约，需先更新交易组件',
+    gang_tax_sell_quote_unavailable:'暂时无法取得含税的实际卖出报价，请稍后重试',wallet_job_running:'这个钱包正在处理上一笔交易，请查看下方进度',wallet_previous_order_needs_reconciliation:'上一笔结果还在核对，请勿重复下单',
   prior_trade_unresolved_check_chain:'上一笔结果还未查明，正在等待链上核对',budget_insufficient_for_target:'当前价格下，买满目标会超过你的金额上限，本次没有继续买入',
   buy_price_slippage_limit:'价格变化已超过滑点上限，本次没有继续买入',wallet_not_connected:'请先扫码连接钱包',wallet_session_expired:'钱包登录已过期，请重新扫码',
   no_gang_tokens_to_sell:'这个钱包没有可卖出的代币',no_flap_tokens_to_sell:'这个钱包没有可卖出的代币',no_flap_shares:'这个钱包没有可卖出的份额',
@@ -77,7 +79,7 @@ $('quote').addEventListener('click',async()=>{try{const bps=side==='buy'?percent
   $('quoteResult').textContent=`${q.action==='buy'?'预计买到 '+q.expectedTokens:'预计卖出 '+q.tokensToSell} · 报价币金额 ${q.quoteAmount} · BNB 等值约 ${q.nativeValueBNB}。仅报价，成交以实际回执为准。`;
 }catch(error){notice(error.message);}});
 async function inspect(){const token=$('token').value.trim();if(!CA.test(token))throw Error('请输入完整合约地址');
-  info=await api('/api/inspect',{token});$('identified').textContent=`${info.label} · ${phase(info.phase)} · ${info.token} · 底池 ${info.quote}${info.canTrade?'':' · 当前路径未验证'}`;
+  info=await api('/api/inspect',{token});$('identified').textContent=`${info.label} · ${phase(info.phase)} · ${info.token} · 底池 ${info.quote}${info.canTrade?'':' · 当前路径未验证'}${info.kind==='fair'?(info.phase==='curve'?' · 固定整份打新；单钱包上限 '+info.maxBuyPercent+'%':'')+' · 发射后卖出或转出可能失去后续分红':''}`;
   detailToken=info.token;$('selectedName').textContent=info.symbol||short(info.token);refreshDetail();}
 $('inspect').addEventListener('click',()=>inspect().catch(e=>notice(e.message)));
 $('token').addEventListener('input',()=>{info=null;$('identified').textContent='地址已变更，交易提交时会重新核对平台和阶段。';$('migrationEnabled').checked=false;$('migrationRecipientBox').hidden=true;});
